@@ -1,5 +1,5 @@
 project:
-  name: phd_4dstem_pyxem_hyperspy
+  name: large_mib_4dstem_analysis
   output_dir: outputs
 
 data:
