@@ -1,5 +1,5 @@
 project:
-  name: large_mib_4dstem_analysis
+  name: large_4dstem_analysis
   output_dir: outputs
 
 data:

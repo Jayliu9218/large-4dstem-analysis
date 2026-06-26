@@ -1,4 +1,4 @@
-# large-mib-4dstem-analysis
+# large-4dstem-analysis
 
 Notebook-first workflow for large 4D-STEM data, focused on:
 
