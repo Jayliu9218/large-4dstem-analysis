@@ -16,6 +16,10 @@ def load_dataset(
     cache: str | Path | None = None,
     chunks: dict[str, Any] | tuple[int, ...] | None = None,
     backend: str | None = None,
+    scan_shape: tuple[int, int] | list[int] | None = None,
+    detector_shape: tuple[int, int] | list[int] | None = None,
+    dtype: str | np.dtype | None = None,
+    mib_header_bytes: int | None = None,
 ) -> DatasetHandle:
     """Load a 4D-STEM dataset.
 
@@ -74,13 +78,121 @@ def load_dataset(
         )
 
     if suffix == ".mib":
-        return _load_mib_with_hyperspy(data_path, lazy=lazy, cache=cache, chunks=chunks, backend=backend)
+        return _load_mib_with_hyperspy(
+            data_path,
+            lazy=lazy,
+            cache=cache,
+            chunks=chunks,
+            backend=backend,
+            scan_shape=scan_shape,
+            detector_shape=detector_shape,
+            dtype=dtype,
+            mib_header_bytes=mib_header_bytes,
+        )
 
     return _load_with_hyperspy(data_path, lazy=lazy, cache=cache, chunks=chunks, backend=backend)
 
 
-def _load_mib_with_hyperspy(path: Path, *, lazy: bool, cache: str | Path | None, chunks: Any, backend: str | None) -> DatasetHandle:
-    return _load_with_hyperspy(path, lazy=lazy, cache=cache, chunks=chunks, backend=backend or "hyperspy_pyxem", source="mib")
+def _load_mib_with_hyperspy(
+    path: Path,
+    *,
+    lazy: bool,
+    cache: str | Path | None,
+    chunks: Any,
+    backend: str | None,
+    scan_shape: tuple[int, int] | list[int] | None,
+    detector_shape: tuple[int, int] | list[int] | None,
+    dtype: str | np.dtype | None,
+    mib_header_bytes: int | None,
+) -> DatasetHandle:
+    try:
+        return _load_with_hyperspy(path, lazy=lazy, cache=cache, chunks=chunks, backend=backend or "hyperspy_pyxem", source="mib")
+    except ImportError:
+        if scan_shape is None or detector_shape is None:
+            raise
+        return _load_mib_memmap(
+            path,
+            scan_shape=scan_shape,
+            detector_shape=detector_shape,
+            dtype=dtype or np.uint16,
+            header_bytes=mib_header_bytes,
+            cache=cache,
+            backend=backend,
+        )
+
+
+class MIBMemmapArray:
+    """NumPy-like view for fixed-frame MIB files with per-frame headers."""
+
+    def __init__(self, path: Path, scan_shape: tuple[int, int], detector_shape: tuple[int, int], dtype: np.dtype, header_bytes: int):
+        self.path = path
+        self.scan_shape = scan_shape
+        self.detector_shape = detector_shape
+        self.dtype = dtype
+        self.header_bytes = int(header_bytes)
+        frame_dtype = np.dtype([("header", f"V{self.header_bytes}"), ("image", self.dtype, self.detector_shape)])
+        self._frames = np.memmap(path, mode="r", dtype=frame_dtype, shape=self.scan_shape)
+        self.shape = self.scan_shape + self.detector_shape
+
+    def __getitem__(self, key: Any) -> np.ndarray:
+        y_key, x_key, qy_key, qx_key = _normalize_mib_key(key)
+        return np.asarray(self._frames[y_key, x_key]["image"][..., qy_key, qx_key])
+
+
+def _load_mib_memmap(
+    path: Path,
+    *,
+    scan_shape: tuple[int, int] | list[int],
+    detector_shape: tuple[int, int] | list[int],
+    dtype: str | np.dtype,
+    header_bytes: int | None,
+    cache: str | Path | None,
+    backend: str | None,
+) -> DatasetHandle:
+    scan = tuple(int(v) for v in scan_shape)
+    detector = tuple(int(v) for v in detector_shape)
+    np_dtype = np.dtype(dtype)
+    if header_bytes is None:
+        header_bytes = _infer_mib_header_bytes(path, scan, detector, np_dtype)
+    data = MIBMemmapArray(path, scan, detector, np_dtype, header_bytes)
+    return DatasetHandle(
+        data=data,
+        source="mib",
+        metadata={
+            "path": str(path),
+            "cache": str(cache) if cache else None,
+            "lazy": True,
+            "source_backend": backend or "mib_memmap",
+            "scan_shape": scan,
+            "detector_shape": detector,
+            "mib_header_bytes": header_bytes,
+            "axes": [],
+            "pyxem_available": False,
+            "pyxem_signal_type": None,
+            "pyxem_error": "HyperSpy not installed; used fixed-frame memmap fallback.",
+        },
+    )
+
+
+def _infer_mib_header_bytes(path: Path, scan_shape: tuple[int, int], detector_shape: tuple[int, int], dtype: np.dtype) -> int:
+    n_frames = int(np.prod(scan_shape))
+    image_bytes = int(np.prod(detector_shape) * dtype.itemsize)
+    frame_bytes, remainder = divmod(path.stat().st_size, n_frames)
+    if remainder or frame_bytes < image_bytes:
+        raise ValueError(
+            f"Cannot infer fixed MIB frame layout for {path}: file size is not compatible "
+            f"with scan_shape={scan_shape}, detector_shape={detector_shape}, dtype={dtype}."
+        )
+    return frame_bytes - image_bytes
+
+
+def _normalize_mib_key(key: Any) -> tuple[Any, Any, Any, Any]:
+    if not isinstance(key, tuple):
+        key = (key,)
+    key = key + (slice(None),) * (4 - len(key))
+    if len(key) != 4:
+        raise IndexError("MIBMemmapArray expects 4D indexing.")
+    return key
 
 
 def _load_with_hyperspy(

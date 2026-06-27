@@ -6,7 +6,7 @@ from typing import Any
 
 from .config import load_workflow_config
 from .dataset import DatasetHandle
-from .export import save_summary
+from .export import save_annotated_label_png, save_label_png, save_png, save_profile_png, save_summary
 from .fingerprints import FingerprintResult, compute_radial_fingerprints
 from .loaders import load_dataset
 from .masks import build_annular_masks
@@ -42,6 +42,10 @@ def run_workflow(config: str | Path | dict[str, Any] = "configs/default_workflow
         cache=data_cfg.get("cache"),
         chunks=data_cfg.get("chunks"),
         backend=data_cfg.get("backend"),
+        scan_shape=data_cfg.get("scan_shape"),
+        detector_shape=data_cfg.get("detector_shape"),
+        dtype=data_cfg.get("dtype"),
+        mib_header_bytes=data_cfg.get("mib_header_bytes"),
     )
     dataset = apply_preprocess(dataset, **cfg.get("preprocess", {}))
 
@@ -88,6 +92,8 @@ def run_workflow(config: str | Path | dict[str, Any] = "configs/default_workflow
     if bool(roi_cfg.get("enabled", False)):
         roi_bragg = _run_roi_bragg(data_cfg, roi_cfg, output_dir / "roi_bragg")
 
+    png_outputs = _save_png_outputs(output_dir / "png", virtual, fingerprints, phase, orientation)
+
     summary = {
         "project": project_cfg,
         "data_config": data_cfg,
@@ -98,6 +104,7 @@ def run_workflow(config: str | Path | dict[str, Any] = "configs/default_workflow
             "phase_screening": str(phase.output_dir),
             "orientation": str(orientation.output_dir),
             "roi_bragg": roi_bragg,
+            "png": {name: str(path) for name, path in png_outputs.items()},
         },
         "shapes": {
             "virtual_images": {name: image.shape for name, image in virtual.images.items()},
@@ -152,6 +159,36 @@ def _resolve_data_config(data_cfg: dict[str, Any]) -> dict[str, Any]:
     resolved["path"] = str(candidates[index])
     resolved["matched_files"] = [str(path) for path in candidates]
     return resolved
+
+
+def _save_png_outputs(
+    output_dir: Path,
+    virtual: VirtualImageResult,
+    fingerprints: FingerprintResult,
+    phase: PhaseScreeningResult,
+    orientation: OrientationResult,
+) -> dict[str, Path]:
+    paths: dict[str, Path] = {}
+    for name, image in virtual.images.items():
+        paths[f"virtual_{name}"] = save_png(output_dir / f"virtual_{name}.png", image)
+    paths["com_x"] = save_png(output_dir / "com_x.png", virtual.com_x)
+    paths["com_y"] = save_png(output_dir / "com_y.png", virtual.com_y)
+    paths["mean_diffraction"] = save_png(output_dir / "mean_diffraction.png", virtual.mean_diffraction)
+    paths["max_diffraction"] = save_png(output_dir / "max_diffraction.png", virtual.max_diffraction)
+    paths["mean_radial_profile"] = save_profile_png(
+        output_dir / "mean_radial_profile.png",
+        fingerprints.radii,
+        fingerprints.profiles,
+    )
+    paths["phase_labels"] = save_label_png(output_dir / "phase_labels.png", phase.labels)
+    paths["phase_labels_annotated"] = save_annotated_label_png(output_dir / "phase_labels_annotated.png", phase.labels)
+    paths["phase_low_confidence"] = save_png(output_dir / "phase_low_confidence_mask.png", phase.low_confidence_mask)
+    for name, score in phase.candidate_scores.items():
+        paths[f"candidate_score_{name}"] = save_png(output_dir / f"candidate_score_{name}.png", score)
+    paths["orientation_index"] = save_label_png(output_dir / "orientation_index.png", orientation.orientation_index)
+    paths["orientation_score"] = save_png(output_dir / "orientation_score.png", orientation.score)
+    paths["orientation_low_confidence"] = save_png(output_dir / "orientation_low_confidence_mask.png", orientation.low_confidence_mask)
+    return paths
 
 
 def _run_roi_bragg(data_cfg: dict[str, Any], roi_cfg: dict[str, Any], output_dir: Path) -> dict[str, Any]:
