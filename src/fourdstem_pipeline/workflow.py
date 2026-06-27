@@ -129,7 +129,7 @@ def run_workflow(
     preprocess_dir = output_dir / "00_preprocess"
     virtual_dir = output_dir / "virtual"
     fingerprints_dir = output_dir / "fingerprints"
-    classes_dir = output_dir / "diffraction_classes"
+    classes_dir = output_dir / "fingerprint_classes"
     orientation_dir = output_dir / "orientation"
     png_dir = output_dir / "png"
     preprocess_dir.mkdir(parents=True, exist_ok=True)
@@ -365,7 +365,7 @@ def run_workflow(
         "outputs": {
             "virtual": str(virtual_dir),
             "fingerprints": str(fingerprints_dir),
-            "diffraction_classes": str(classes_dir),
+            "fingerprint_classes": str(classes_dir),
             "orientation": str(orientation_dir),
             "cluster_diagnostics": diagnostics.get("cluster_diagnostics"),
             "roi_candidates": diagnostics.get("roi_candidates"),
@@ -376,7 +376,7 @@ def run_workflow(
         "shapes": {
             "virtual_images": {name: image.shape for name, image in virtual.images.items()} if virtual else {},
             "radial_fingerprints": fingerprints.profiles.shape if fingerprints else None,
-            "diffraction_class_labels": phase.labels.shape if phase else None,
+            "fingerprint_class_labels": phase.labels.shape if phase else None,
             "orientation_index": orientation.orientation_index.shape if orientation else None,
         },
         "errors": errors if errors else None,
@@ -516,7 +516,7 @@ def _save_stage1_outputs(
         _np.save(fingerprints_dir / "radial_axis.npy", fingerprints.radii)
 
     # --- stage1_summary.json -------------------------------------------------
-    labels_path = classes_dir / "diffraction_class_labels.npy"
+    labels_path = classes_dir / "fingerprint_class_labels.npy"
     roi_candidates_path = output_dir / "roi_candidates" / "roi_candidates.yaml"
     stage1_summary = {
         "run_name": str(project_cfg.get("name", "unnamed")),
@@ -540,8 +540,8 @@ def _save_stage1_outputs(
         "preprocess_info_path": "preprocess_info.json",
         "provenance_path": "provenance.json",
         "qc_summary_path": "qc_summary.json",
-        "cluster_summary_path": "diffraction_classes/cluster_summary.csv",
-        "cluster_mean_radial_profiles_path": "diffraction_classes/cluster_mean_radial_profiles.npy",
+        "cluster_summary_path": "fingerprint_classes/cluster_summary.csv",
+        "cluster_mean_radial_profiles_path": "fingerprint_classes/cluster_mean_radial_profiles.npy",
     }
     (output_dir / "stage1_summary.json").write_text(
         _json.dumps(stage1_summary, indent=2, default=str), encoding="utf-8",
@@ -626,13 +626,13 @@ def _save_png_outputs(
         fingerprints.radii,
         fingerprints.profiles,
     )
-    paths["diffraction_class_labels"] = save_label_png(output_dir / "diffraction_class_labels.png", phase.labels)
-    paths["diffraction_class_labels_annotated"] = save_annotated_label_png(
-        output_dir / "diffraction_class_labels_annotated.png",
+    paths["fingerprint_class_labels"] = save_label_png(output_dir / "fingerprint_class_labels.png", phase.labels)
+    paths["fingerprint_class_labels_annotated"] = save_annotated_label_png(
+        output_dir / "fingerprint_class_labels_annotated.png",
         phase.labels,
-        title="Diffraction-class map from radial fingerprints",
+        title="Fingerprint-class map from radial profiles",
     )
-    paths["diffraction_class_low_confidence"] = save_png(output_dir / "diffraction_class_low_confidence_mask.png", phase.low_confidence_mask)
+    paths["fingerprint_class_low_confidence"] = save_png(output_dir / "fingerprint_class_low_confidence_mask.png", phase.low_confidence_mask)
     for name, score in phase.candidate_scores.items():
         paths[f"candidate_score_{name}"] = save_png(output_dir / f"candidate_score_{name}.png", score)
     paths["orientation_index"] = save_label_png(output_dir / "orientation_index.png", orientation.orientation_index)

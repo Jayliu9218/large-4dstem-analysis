@@ -314,7 +314,7 @@ def normalisation_comparison(
     for name, values in variants.items():
         labels_result = cluster_matrix(values, profiles.shape[:2], n_clusters)
         np.save(class_dir / f"labels_{name}.npy", labels_result)
-        save_label_png(png_dir / f"diffraction_class_labels_{name}.png", labels_result)
+        save_label_png(png_dir / f"fingerprint_class_labels_{name}.png", labels_result)
         outputs[name] = str(class_dir / f"labels_{name}.npy")
     return outputs
 
@@ -340,7 +340,7 @@ def k_sweep(
         labels_flat = KMeans(n_clusters=k, random_state=0, n_init="auto").fit_predict(embedding)
         labels_result = labels_flat.reshape(profiles.shape[:2])
         np.save(class_dir / f"labels_k{k}.npy", labels_result)
-        save_label_png(png_dir / f"diffraction_class_labels_k{k}.png", labels_result)
+        save_label_png(png_dir / f"fingerprint_class_labels_k{k}.png", labels_result)
         metric_labels = labels_flat[sample]
         metric_embedding = embedding[sample]
         rows.append(

@@ -57,7 +57,7 @@ def run_stage1_diagnostics(
     png_dir = Path(png_dir)
     cluster_dir = output_dir / "05_cluster_diagnostics"
     roi_dir = output_dir / "roi_candidates"
-    class_dir = output_dir / "diffraction_classes"
+    class_dir = output_dir / "fingerprint_classes"
     orientation_dir = output_dir / "orientation"
     cluster_dir.mkdir(parents=True, exist_ok=True)
     roi_dir.mkdir(parents=True, exist_ok=True)

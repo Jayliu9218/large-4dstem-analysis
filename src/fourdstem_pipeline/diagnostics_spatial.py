@@ -104,13 +104,13 @@ def connected_component_diagnostics(
     class_outputs: dict[str, str] = {}
     if class_dir is not None:
         class_dir.mkdir(parents=True, exist_ok=True)
-        class_npy = class_dir / "diffraction_class_labels_cleaned.npy"
-        class_png = class_dir / "diffraction_class_labels_cleaned.png"
+        class_npy = class_dir / "fingerprint_class_labels_cleaned.npy"
+        class_png = class_dir / "fingerprint_class_labels_cleaned.png"
         np.save(class_npy, cleaned.astype(np.int16))
         save_label_png(class_png, cleaned)
         class_outputs = {
-            "diffraction_class_labels_cleaned_npy": str(class_npy),
-            "diffraction_class_labels_cleaned_png": str(class_png),
+            "fingerprint_class_labels_cleaned_npy": str(class_npy),
+            "fingerprint_class_labels_cleaned_png": str(class_png),
         }
     save_bar_png(
         png_dir / "cluster_area_histogram.png",
@@ -201,7 +201,7 @@ def roi_candidates(
             rois.append(
                 _roi_from_component(
                     f"cluster{cluster_id}_minority_01", largest, labels.shape,
-                    cluster=cluster_id, reason="minority diffraction class", size=32,
+                    cluster=cluster_id, reason="minority fingerprint class", size=32,
                 )
             )
     boundary = np.argwhere(_boundary_mask(labels))

@@ -1,5 +1,5 @@
 project:
-  name: 0617_4d_stage1_diffraction_class_screening
+  name: 0617_4d_stage1_fingerprint_class_screening
   output_dir: outputs/0617_4d_stage1
 
 data:

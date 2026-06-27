@@ -439,7 +439,7 @@ def _warn_unknown_keys(cfg: dict[str, Any], checks: list[dict[str, Any]]) -> Non
 def _resolve_stages(cfg: dict[str, Any]) -> list[str]:
     """Return the ordered list of enabled stages."""
     stages = ["load", "preprocess", "virtual_images", "sample_mask", "fingerprints",
-              "diffraction_classes", "orientation_preview"]
+              "fingerprint_classes", "orientation_preview"]
     roi_cfg = cfg.get("roi_bragg", {})
     if roi_cfg.get("enabled", False):
         stages.append("roi_bragg")

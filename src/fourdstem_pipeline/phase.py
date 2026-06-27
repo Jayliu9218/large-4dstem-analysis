@@ -33,7 +33,7 @@ def screen_phases(
     n_clusters: int = 3,
     output_dir: str | Path | None = None,
 ) -> PhaseScreeningResult:
-    """Cluster radial fingerprints into unsupervised diffraction classes."""
+    """Cluster radial fingerprints into unsupervised fingerprint classes."""
     profiles = fingerprints.profiles
     nav_shape = profiles.shape[:2]
     matrix = profiles.reshape(-1, profiles.shape[-1]).astype(np.float32)
@@ -108,9 +108,9 @@ def _cluster_confidence(embedding: np.ndarray, labels: np.ndarray, n_clusters: i
 def _save_phase_result(result: PhaseScreeningResult) -> None:
     assert result.output_dir is not None
     result.output_dir.mkdir(parents=True, exist_ok=True)
-    np.save(result.output_dir / "diffraction_class_labels.npy", result.labels)
-    np.save(result.output_dir / "diffraction_class_embedding.npy", result.embedding)
-    np.save(result.output_dir / "diffraction_class_representative_profiles.npy", result.representative_profiles)
-    np.save(result.output_dir / "diffraction_class_low_confidence_mask.npy", result.low_confidence_mask)
+    np.save(result.output_dir / "fingerprint_class_labels.npy", result.labels)
+    np.save(result.output_dir / "fingerprint_class_embedding.npy", result.embedding)
+    np.save(result.output_dir / "fingerprint_class_representative_profiles.npy", result.representative_profiles)
+    np.save(result.output_dir / "fingerprint_class_low_confidence_mask.npy", result.low_confidence_mask)
     for name, score in result.candidate_scores.items():
         np.save(result.output_dir / f"candidate_score_{name}.npy", score)
