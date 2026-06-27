@@ -6,7 +6,7 @@ from typing import Any
 
 from .config import load_workflow_config
 from .dataset import DatasetHandle
-from .export import save_annotated_label_png, save_label_png, save_png, save_profile_png, save_summary
+from .export import save_annotated_label_png, save_label_png, save_png, save_profile_png, save_report, save_summary
 from .fingerprints import FingerprintResult, compute_radial_fingerprints
 from .loaders import load_dataset
 from .masks import build_annular_masks
@@ -26,6 +26,7 @@ class WorkflowResult:
     orientation: OrientationResult
     roi_bragg: dict[str, Any] | None
     summary_path: Path
+    report_path: Path
 
 
 def run_workflow(config: str | Path | dict[str, Any] = "configs/default_workflow.yaml") -> WorkflowResult:
@@ -97,6 +98,7 @@ def run_workflow(config: str | Path | dict[str, Any] = "configs/default_workflow
     summary = {
         "project": project_cfg,
         "data_config": data_cfg,
+        "preprocess": cfg.get("preprocess", {}),
         "dataset": dataset.describe(),
         "outputs": {
             "virtual": str(virtual.output_dir),
@@ -113,6 +115,8 @@ def run_workflow(config: str | Path | dict[str, Any] = "configs/default_workflow
             "orientation_index": orientation.orientation_index.shape,
         },
     }
+    report_path = save_report(output_dir, summary, phase.labels)
+    summary["outputs"]["report"] = str(report_path)
     summary_path = save_summary(output_dir, summary)
     return WorkflowResult(
         output_dir=output_dir,
@@ -123,6 +127,7 @@ def run_workflow(config: str | Path | dict[str, Any] = "configs/default_workflow
         orientation=orientation,
         roi_bragg=roi_bragg,
         summary_path=summary_path,
+        report_path=report_path,
     )
 
 

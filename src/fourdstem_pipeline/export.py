@@ -16,6 +16,13 @@ def save_summary(output_dir: str | Path, summary: dict[str, Any]) -> Path:
     return path
 
 
+def save_report(output_dir: str | Path, summary: dict[str, Any], phase_labels: np.ndarray) -> Path:
+    path = Path(output_dir) / "report.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_render_report(summary, phase_labels, base_dir=path.parent), encoding="utf-8")
+    return path
+
+
 def save_npz(output_dir: str | Path, name: str, **arrays: np.ndarray) -> Path:
     path = Path(output_dir) / f"{name}.npz"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,6 +177,86 @@ def _write_rgb_png(path: Path, rgb: np.ndarray) -> None:
 
 def _png_chunk(kind: bytes, data: bytes) -> bytes:
     return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+
+def _render_report(summary: dict[str, Any], phase_labels: np.ndarray, *, base_dir: Path) -> str:
+    project = summary.get("project", {})
+    data = summary.get("data_config", {})
+    dataset = summary.get("dataset", {})
+    outputs = summary.get("outputs", {})
+    png = outputs.get("png", {}) if isinstance(outputs.get("png"), dict) else {}
+    shapes = summary.get("shapes", {})
+    preprocess = summary.get("preprocess", "see workflow_summary.json")
+    title = str(project.get("name", "4D-STEM Screening Report"))
+
+    lines = [
+        f"# {title}",
+        "",
+        "## Data",
+        "",
+        f"- Source: `{data.get('path', dataset.get('path', 'unknown'))}`",
+        f"- Backend: `{dataset.get('source_backend', 'unknown')}`",
+        f"- Preprocessed shape: `{dataset.get('shape', 'unknown')}`",
+        f"- Navigation shape: `{dataset.get('navigation_shape', 'unknown')}`",
+        f"- Signal shape: `{dataset.get('signal_shape', 'unknown')}`",
+        "",
+        "## Screening Settings",
+        "",
+        f"- q-crop/q-bin/r-bin: `{preprocess}`",
+        f"- Virtual image shapes: `{shapes.get('virtual_images', 'unknown')}`",
+        f"- Radial fingerprints: `{shapes.get('radial_fingerprints', 'unknown')}`",
+        f"- Phase labels: `{shapes.get('phase_labels', 'unknown')}`",
+        f"- Orientation preview: `{shapes.get('orientation_index', 'unknown')}`",
+        "",
+        "## Phase Clusters",
+        "",
+        "| Cluster | Pixels | Fraction |",
+        "| --- | ---: | ---: |",
+    ]
+
+    labels, counts = np.unique(np.asarray(phase_labels), return_counts=True)
+    total = max(int(counts.sum()), 1)
+    for label, count in zip(labels, counts):
+        lines.append(f"| {int(label)} | {int(count)} | {int(count) / total:.3f} |")
+
+    lines.extend(["", "## Key PNG Outputs", ""])
+    for key in [
+        "phase_labels_annotated",
+        "phase_labels",
+        "virtual_bf",
+        "virtual_adf",
+        "virtual_haadf",
+        "com_x",
+        "com_y",
+        "mean_diffraction",
+        "mean_radial_profile",
+        "orientation_index",
+        "orientation_score",
+    ]:
+        if key in png:
+            png_path = Path(png[key])
+            try:
+                link = png_path.relative_to(base_dir).as_posix()
+            except ValueError:
+                link = png_path.as_posix()
+            lines.append(f"- {key}: [{png_path.name}]({link})")
+
+    lines.extend(
+        [
+            "",
+            "## Output Directories",
+            "",
+            f"- Virtual images: `{outputs.get('virtual', 'not generated')}`",
+            f"- Fingerprints: `{outputs.get('fingerprints', 'not generated')}`",
+            f"- Phase screening: `{outputs.get('phase_screening', 'not generated')}`",
+            f"- Orientation: `{outputs.get('orientation', 'not generated')}`",
+            f"- PNG previews: `{Path(next(iter(png.values()))).parent.as_posix() if png else 'not generated'}`",
+            "",
+            "Notes: phase labels are unsupervised cluster IDs from radial fingerprints. They are phase-like screening labels, not crystallographic phase assignments by themselves.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 _FONT_5X7 = {
