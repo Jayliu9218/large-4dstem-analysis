@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .config import load_workflow_config, resolve_data_config
+from .contracts import DataContract
 from .dataset import DatasetHandle
 from .diagnostics import run_stage1_diagnostics
 from .export import save_annotated_label_png, save_label_png, save_png, save_profile_png, save_report, save_summary
@@ -24,6 +26,9 @@ from .masks import build_annular_masks
 from .orientation import OrientationResult, run_orientation_preview
 from .phase import PhaseScreeningResult, screen_phases
 from .preprocess import apply_preprocess
+from .provenance import collect_provenance, save_provenance
+from .qc import QCResult, run_qc_checks, save_qc_summary
+from .sample_mask import apply_mask_to_labels, clean_mask, make_sample_mask, save_sample_mask_outputs
 from .virtual import VirtualImageResult, compute_virtual_images
 
 log = get_logger(__name__)
@@ -61,6 +66,7 @@ def run_workflow(
     """
     configure_pipeline_logging(level=log_level)
     t0 = time.perf_counter()
+    start_time = datetime.now(timezone.utc)
 
     cfg = load_workflow_config(config) if isinstance(config, (str, Path)) else dict(config)
     _validate_dict_config(cfg)
@@ -121,10 +127,10 @@ def run_workflow(
     )
 
     preprocess_dir = output_dir / "00_preprocess"
-    virtual_dir = output_dir / "01_virtual_images"
-    fingerprints_dir = output_dir / "02_fingerprints"
-    classes_dir = output_dir / "03_diffraction_classes"
-    orientation_dir = output_dir / "04_orientation_preview"
+    virtual_dir = output_dir / "virtual"
+    fingerprints_dir = output_dir / "fingerprints"
+    classes_dir = output_dir / "diffraction_classes"
+    orientation_dir = output_dir / "orientation"
     png_dir = output_dir / "png"
     preprocess_dir.mkdir(parents=True, exist_ok=True)
 
@@ -136,6 +142,43 @@ def run_workflow(
         lambda: compute_virtual_images(dataset, masks, output_dir=virtual_dir, block_shape=block_shape),
         errors=errors,
     )
+
+    # ------------------------------------------------------------------
+    # Sample mask (from virtual ADF / HAADF)
+    # ------------------------------------------------------------------
+    sample_mask_cfg = cfg.get("sample_mask", {})
+    sample_mask: np.ndarray | None = None
+    if bool(sample_mask_cfg.get("enabled", False)) and virtual is not None:
+        source_name = str(sample_mask_cfg.get("source", "adf"))
+        source_image = virtual.images.get(source_name)
+        if source_image is not None:
+            sample_mask = clean_mask(
+                make_sample_mask(
+                    source_image,
+                    percentile=float(sample_mask_cfg.get("percentile", 15)),
+                ),
+                min_size=int(sample_mask_cfg.get("min_size", 100)),
+                fill_holes=bool(sample_mask_cfg.get("fill_holes", True)),
+            )
+            mask_outputs = save_sample_mask_outputs(
+                preprocess_dir, png_dir, sample_mask, source_image,
+            )
+            sample_frac = float(sample_mask.mean())
+            log.info(
+                "Sample mask from %r: %.1f%% sample, %.1f%% background",
+                source_name,
+                100 * sample_frac,
+                100 * (1 - sample_frac),
+            )
+        else:
+            log.warning(
+                "Sample mask enabled but source %r not found in virtual images. "
+                "Available: %s. Skipping mask.",
+                source_name,
+                ", ".join(sorted(virtual.images.keys())),
+            )
+    elif bool(sample_mask_cfg.get("enabled", False)):
+        log.warning("Sample mask enabled but virtual images failed — skipping mask.")
 
     # ------------------------------------------------------------------
     # Stage 2: Radial fingerprints
@@ -151,6 +194,11 @@ def run_workflow(
         ),
         errors=errors,
     )
+
+    # Apply sample mask to fingerprint profiles before clustering so that
+    # vacuum / background positions do not influence PCA / NMF / KMeans.
+    if sample_mask is not None and fingerprints is not None:
+        fingerprints.profiles[~sample_mask] = 0
 
     # ------------------------------------------------------------------
     # Stage 3: Phase screening
@@ -168,6 +216,13 @@ def run_workflow(
         ),
         errors=errors,
     )
+
+    # Set labels outside the sample mask to background_label so that
+    # downstream diagnostics, ROI candidates, and reports clearly
+    # distinguish sample from vacuum / excluded regions.
+    if sample_mask is not None and phase is not None:
+        background_label = int(sample_mask_cfg.get("background_label", -1))
+        apply_mask_to_labels(phase.labels, sample_mask, background_label)
 
     # ------------------------------------------------------------------
     # Stage 4: Orientation preview
@@ -248,14 +303,65 @@ def run_workflow(
     else:
         log.warning("Skipping diagnostics because one or more upstream stages failed.")
 
+    # Sample mask PNGs (may exist even when diagnostics are skipped)
+    for key, filename in {
+        "sample_mask": "sample_mask.png",
+        "sample_mask_overlay_adf": "sample_mask_overlay_adf.png",
+    }.items():
+        path = png_dir / filename
+        if path.exists():
+            png_outputs[key] = path
+
+    # ------------------------------------------------------------------
+    # Provenance
+    # ------------------------------------------------------------------
+    end_time = datetime.now(timezone.utc)
+    input_path = data_cfg.get("path") if data_cfg.get("path") and data_cfg.get("path") not in ("synthetic://demo",) else None
+    config_for_prov = config if isinstance(config, (str, Path)) else cfg
+    random_seed = cfg.get("random_seed") if isinstance(cfg.get("random_seed"), int) else None
+    provenance = collect_provenance(
+        config=config_for_prov,
+        input_path=input_path,
+        run_name=str(project_cfg.get("name", "unnamed")),
+        start_time=start_time,
+        end_time=end_time,
+        random_seed=random_seed,
+    )
+    save_provenance(output_dir, provenance)
+
+    # ------------------------------------------------------------------
+    # QC
+    # ------------------------------------------------------------------
+    qc_result = run_qc_checks(
+        dataset=dataset,
+        virtual=virtual,
+        fingerprints=fingerprints,
+        phase=phase,
+        orientation=orientation,
+        diagnostics=diagnostics,
+        errors=errors if errors else None,
+        confidence_threshold=float(orientation_cfg.get("confidence_threshold", 0.05)),
+        sample_mask=sample_mask,
+    )
+    save_qc_summary(output_dir, qc_result)
+
     # ------------------------------------------------------------------
     # Summary & report
     # ------------------------------------------------------------------
+    data_contract = DataContract(
+        array_shape=dataset.shape if dataset else None,
+        nav_shape=dataset.navigation_shape if dataset else None,
+        sig_shape=dataset.signal_shape if dataset else None,
+    )
+
     summary = {
         "project": project_cfg,
         "data_config": data_cfg,
         "preprocess": cfg.get("preprocess", {}),
         "dataset": dataset.describe(),
+        "data_contract": data_contract.to_dict(),
+        "provenance": provenance,
+        "qc": qc_result.to_dict(),
         "outputs": {
             "virtual": str(virtual_dir),
             "fingerprints": str(fingerprints_dir),
@@ -274,9 +380,36 @@ def run_workflow(
             "orientation_index": orientation.orientation_index.shape if orientation else None,
         },
         "errors": errors if errors else None,
+        "sample_mask": {
+            "enabled": bool(sample_mask_cfg.get("enabled", False)),
+            "generated": sample_mask is not None,
+            "sample_pixels": int(sample_mask.sum()) if sample_mask is not None else None,
+            "background_pixels": int((~sample_mask).sum()) if sample_mask is not None else None,
+            "sample_fraction": round(float(sample_mask.mean()), 6) if sample_mask is not None else None,
+        },
     }
 
     import numpy as _np
+
+    # ------------------------------------------------------------------
+    # Stage 1 → Stage 2 file interface
+    # ------------------------------------------------------------------
+    _save_stage1_outputs(
+        output_dir=output_dir,
+        virtual_dir=virtual_dir,
+        fingerprints_dir=fingerprints_dir,
+        classes_dir=classes_dir,
+        orientation_dir=orientation_dir,
+        dataset=dataset,
+        virtual=virtual,
+        fingerprints=fingerprints,
+        phase=phase,
+        orientation=orientation,
+        diagnostics=diagnostics,
+        data_contract=data_contract,
+        cfg=cfg,
+        qc_result=qc_result,
+    )
 
     report_path = save_report(
         output_dir, summary,
@@ -319,6 +452,101 @@ def run_workflow(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _save_stage1_outputs(
+    *,
+    output_dir: Path,
+    virtual_dir: Path,
+    fingerprints_dir: Path,
+    classes_dir: Path,
+    orientation_dir: Path,
+    dataset: DatasetHandle | None,
+    virtual: VirtualImageResult | None,
+    fingerprints: FingerprintResult | None,
+    phase: PhaseScreeningResult | None,
+    orientation: OrientationResult | None,
+    diagnostics: dict[str, Any],
+    data_contract: DataContract,
+    cfg: dict[str, Any],
+    qc_result: QCResult,
+) -> None:
+    """Write the stable Stage-1 → Stage-2 file interface.
+
+    Creates ``stage1_summary.json`` (the canonical manifest for Stage 2),
+    ``data_contract.json``, ``preprocess_info.json``, bundles virtual images
+    into ``virtual/virtual_images.npz``, and saves ``radial_axis.npy``
+    alongside the fingerprint profiles.
+    """
+    import json as _json
+
+    project_cfg = cfg.get("project", {})
+    preprocess_cfg = cfg.get("preprocess", {})
+
+    # --- data_contract.json --------------------------------------------------
+    (output_dir / "data_contract.json").write_text(
+        _json.dumps(data_contract.to_dict(), indent=2), encoding="utf-8",
+    )
+
+    # --- preprocess_info.json ------------------------------------------------
+    preprocess_info = {
+        "q_crop": preprocess_cfg.get("q_crop"),
+        "q_bin": int(preprocess_cfg.get("q_bin", 1)),
+        "r_bin": int(preprocess_cfg.get("r_bin", 1)),
+        "original_shape": list(dataset.shape) if dataset else None,
+        "preprocessed_shape": list(dataset.shape) if dataset else None,
+        "nav_shape": list(dataset.navigation_shape) if dataset else None,
+        "sig_shape": list(dataset.signal_shape) if dataset else None,
+    }
+    (output_dir / "preprocess_info.json").write_text(
+        _json.dumps(preprocess_info, indent=2), encoding="utf-8",
+    )
+
+    # --- virtual/virtual_images.npz ------------------------------------------
+    if virtual is not None and virtual.images:
+        import numpy as _np
+        _np.savez_compressed(
+            virtual_dir / "virtual_images.npz",
+            **{name: _np.asarray(img) for name, img in virtual.images.items()},
+        )
+
+    # --- fingerprints/radial_axis.npy ----------------------------------------
+    if fingerprints is not None and fingerprints.radii is not None:
+        import numpy as _np
+        _np.save(fingerprints_dir / "radial_axis.npy", fingerprints.radii)
+
+    # --- stage1_summary.json -------------------------------------------------
+    labels_path = classes_dir / "diffraction_class_labels.npy"
+    roi_candidates_path = output_dir / "roi_candidates" / "roi_candidates.yaml"
+    stage1_summary = {
+        "run_name": str(project_cfg.get("name", "unnamed")),
+        "preprocessed_shape": list(dataset.shape) if dataset else None,
+        "nav_shape": list(dataset.navigation_shape) if dataset else None,
+        "sig_shape": list(dataset.signal_shape) if dataset else None,
+        "q_crop": preprocess_cfg.get("q_crop"),
+        "q_bin": int(preprocess_cfg.get("q_bin", 1)),
+        "r_bin": int(preprocess_cfg.get("r_bin", 1)),
+        "labels_path": str(labels_path.relative_to(output_dir).as_posix())
+        if labels_path.exists() else None,
+        "roi_candidates_path": str(roi_candidates_path.relative_to(output_dir).as_posix())
+        if roi_candidates_path.exists() else None,
+        "qc_status": qc_result.stage1_status,
+        "virtual_images_path": "virtual/virtual_images.npz",
+        "fingerprints_path": "fingerprints/radial_fingerprints.npy",
+        "radial_axis_path": "fingerprints/radial_axis.npy",
+        "orientation_index_path": "orientation/orientation_index.npy",
+        "orientation_score_path": "orientation/orientation_score.npy",
+        "data_contract_path": "data_contract.json",
+        "preprocess_info_path": "preprocess_info.json",
+        "provenance_path": "provenance.json",
+        "qc_summary_path": "qc_summary.json",
+        "cluster_summary_path": "diffraction_classes/cluster_summary.csv",
+        "cluster_mean_radial_profiles_path": "diffraction_classes/cluster_mean_radial_profiles.npy",
+    }
+    (output_dir / "stage1_summary.json").write_text(
+        _json.dumps(stage1_summary, indent=2, default=str), encoding="utf-8",
+    )
+    log.info("Stage-1 → Stage-2 interface written to %s", output_dir)
 
 
 def _make_error_result(

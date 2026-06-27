@@ -133,6 +133,35 @@ _SCHEMA: dict[str, dict[str, Any]] = {
         },
         "defaults": {"enabled": False},
     },
+    "sample_mask": {
+        "allowed": {
+            "enabled",
+            "source",
+            "method",
+            "percentile",
+            "fill_holes",
+            "min_size",
+            "background_label",
+        },
+        "types": {
+            "enabled": (bool,),
+            "source": (str,),
+            "method": (str,),
+            "percentile": (int, float),
+            "fill_holes": (bool,),
+            "min_size": (int, float),
+            "background_label": (int, float),
+        },
+        "defaults": {
+            "enabled": True,
+            "source": "adf",
+            "method": "percentile",
+            "percentile": 15,
+            "fill_holes": True,
+            "min_size": 100,
+            "background_label": -1,
+        },
+    },
 }
 
 _KNOWN_TOP_KEYS = set(_SCHEMA)

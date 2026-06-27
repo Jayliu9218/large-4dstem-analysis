@@ -208,7 +208,7 @@ def roi_candidates(
     if boundary.size:
         center = boundary[len(boundary) // 2]
         rois.append(
-            _roi_from_center("boundary_classes_01", int(center[1]), int(center[0]), labels.shape, 64, "class boundary", None)
+            _roi_from_center("boundary_classes_01", int(center[0]), int(center[1]), labels.shape, 64, "class boundary", None)
         )
     rois.extend(_orientation_rois(orientation, labels.shape))
     rois.extend(_intensity_rois(images, labels.shape))
@@ -239,28 +239,36 @@ def _roi_from_component(
     coords = np.asarray(component)
     y = int(np.median(coords[:, 0]))
     x = int(np.median(coords[:, 1]))
-    return _roi_from_center(name, x, y, shape, size, reason, cluster)
+    return _roi_from_center(name, y, x, shape, size, reason, cluster)
 
 
 def _roi_from_center(
     name: str,
-    x: int,
     y: int,
+    x: int,
     shape: tuple[int, int],
     size: int,
     reason: str,
     cluster: int | None,
 ) -> dict[str, Any]:
+    """Create an ROI dict following the unified data contract.
+
+    Parameters
+    ----------
+    y, x:
+        Centre position in ``(y, x)`` (row, column) order per the
+        ``center_order: y_x`` convention.
+    """
     half = size // 2
-    x0 = max(0, min(x - half, shape[1] - size))
     y0 = max(0, min(y - half, shape[0] - size))
-    x1 = min(shape[1], x0 + size)
+    x0 = max(0, min(x - half, shape[1] - size))
     y1 = min(shape[0], y0 + size)
+    x1 = min(shape[1], x0 + size)
     roi: dict[str, Any] = {
         "name": name,
-        "center": [int((x0 + x1) / 2), int((y0 + y1) / 2)],
-        "bbox": [int(x0), int(x1), int(y0), int(y1)],
-        "size": [int(x1 - x0), int(y1 - y0)],
+        "center": [int((y0 + y1) / 2), int((x0 + x1) / 2)],
+        "bbox": [int(y0), int(y1), int(x0), int(x1)],
+        "size": [int(y1 - y0), int(x1 - x0)],
         "reason": reason,
         "recommended_stage2": "py4dstem_bragg_indexing",
     }
@@ -280,12 +288,12 @@ def _orientation_rois(
     return [
         _roi_from_center(
             "high_orientation_score_01",
-            int((high[1] + 0.5) * scale_x), int((high[0] + 0.5) * scale_y),
+            int((high[0] + 0.5) * scale_y), int((high[1] + 0.5) * scale_x),
             label_shape, 64, "high orientation score", None,
         ),
         _roi_from_center(
             "low_orientation_score_01",
-            int((low[1] + 0.5) * scale_x), int((low[0] + 0.5) * scale_y),
+            int((low[0] + 0.5) * scale_y), int((low[1] + 0.5) * scale_x),
             label_shape, 64, "low orientation score", None,
         ),
     ]
@@ -301,7 +309,7 @@ def _intensity_rois(
             y, x = np.unravel_index(int(np.argmax(images[name])), images[name].shape)
             rois.append(
                 _roi_from_center(
-                    f"{name}_high_intensity_01", int(x), int(y),
+                    f"{name}_high_intensity_01", int(y), int(x),
                     shape, 64, f"{name.upper()} intensity anomaly", None,
                 )
             )
@@ -351,7 +359,7 @@ def _roi_overlay(base: np.ndarray, rois: list[dict[str, Any]]) -> np.ndarray:
     gray = _scale_gray(base)
     rgb = np.repeat(gray[..., None], 3, axis=-1)
     for roi in rois:
-        x0, x1, y0, y1 = [int(v) for v in roi["bbox"]]
+        y0, y1, x0, x1 = [int(v) for v in roi["bbox"]]
         rgb[y0:y1, x0] = [255, 215, 0]
         rgb[y0:y1, max(x1 - 1, x0)] = [255, 215, 0]
         rgb[y0, x0:x1] = [255, 215, 0]

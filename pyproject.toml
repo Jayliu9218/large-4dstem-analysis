@@ -14,6 +14,10 @@ dependencies = [
     "scikit-learn>=1.3",
 ]
 
+[project.scripts]
+fourdstem-run = "fourdstem_pipeline.cli:run"
+fourdstem-dry-run = "fourdstem_pipeline.cli:dry_run"
+
 [project.optional-dependencies]
 large-data = [
     "dask[array]>=2024.1",

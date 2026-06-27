@@ -100,7 +100,7 @@ class WorkflowTests(unittest.TestCase):
         result = run_orientation_preview(
             dataset,
             binning=(2, 2),
-            roi=(4, 4, 12, 12),
+            roi=(4, 12, 4, 12),
             confidence_threshold=0.0,
             output_dir=self.output_dir,
         )
@@ -134,22 +134,30 @@ class WorkflowTests(unittest.TestCase):
                 }
             },
             "phase_screening": {"method": "pca_nmf_cluster", "n_components": 3, "n_clusters": 3, "candidate_phases": []},
-            "orientation": {"preview_binning": [2, 2], "roi": [4, 4, 12, 12], "confidence_threshold": 0.0},
+            "orientation": {"preview_binning": [2, 2], "roi": [4, 12, 4, 12], "confidence_threshold": 0.0},
             "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
         }
         result = run_workflow(config)
         self.assertEqual(result.dataset.navigation_shape, (16, 16))
         self.assertTrue((self.output_dir / "workflow_summary.json").exists())
-        self.assertTrue((self.output_dir / "01_virtual_images" / "virtual_bf.npy").exists())
-        self.assertTrue((self.output_dir / "02_fingerprints" / "radial_fingerprints.npy").exists())
-        self.assertTrue((self.output_dir / "03_diffraction_classes" / "diffraction_class_labels.npy").exists())
-        self.assertTrue((self.output_dir / "03_diffraction_classes" / "diffraction_class_labels_cleaned.npy").exists())
-        self.assertTrue((self.output_dir / "04_orientation_preview" / "orientation_index.npy").exists())
+        self.assertTrue((self.output_dir / "stage1_summary.json").exists())
+        self.assertTrue((self.output_dir / "data_contract.json").exists())
+        self.assertTrue((self.output_dir / "preprocess_info.json").exists())
+        self.assertTrue((self.output_dir / "virtual" / "virtual_bf.npy").exists())
+        self.assertTrue((self.output_dir / "virtual" / "virtual_images.npz").exists())
+        self.assertTrue((self.output_dir / "fingerprints" / "radial_fingerprints.npy").exists())
+        self.assertTrue((self.output_dir / "fingerprints" / "radial_axis.npy").exists())
+        self.assertTrue((self.output_dir / "diffraction_classes" / "diffraction_class_labels.npy").exists())
+        self.assertTrue((self.output_dir / "diffraction_classes" / "diffraction_class_labels_cleaned.npy").exists())
+        self.assertTrue((self.output_dir / "diffraction_classes" / "cluster_summary.csv").exists())
+        self.assertTrue((self.output_dir / "diffraction_classes" / "cluster_mean_radial_profiles.npy").exists())
+        self.assertTrue((self.output_dir / "orientation" / "orientation_index.npy").exists())
         self.assertTrue((self.output_dir / "05_cluster_diagnostics" / "cluster_summary.csv").exists())
         self.assertTrue((self.output_dir / "05_cluster_diagnostics" / "cluster_cleaned_labels.npy").exists())
         self.assertTrue((self.output_dir / "05_cluster_diagnostics" / "ring_2_over_ring_1.npy").exists())
         self.assertTrue((self.output_dir / "05_cluster_diagnostics" / "cluster_vs_orientation.csv").exists())
-        self.assertTrue((self.output_dir / "06_roi_candidates" / "roi_candidates.yaml").exists())
+        self.assertTrue((self.output_dir / "roi_candidates" / "roi_candidates.yaml").exists())
         self.assertTrue((self.output_dir / "report.html").exists())
 
     def test_run_workflow_resolves_directory_input(self):
@@ -171,6 +179,7 @@ class WorkflowTests(unittest.TestCase):
             "phase_screening": {"method": "pca_nmf_cluster", "n_components": 2, "n_clusters": 2, "candidate_phases": []},
             "orientation": {"preview_binning": [2, 2], "roi": None, "confidence_threshold": 0.0},
             "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
         }
         result = run_workflow(config)
         self.assertTrue(result.dataset.metadata["path"].endswith("scan_a.npy"))

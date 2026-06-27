@@ -56,14 +56,14 @@ def run_stage1_diagnostics(
     output_dir = Path(output_dir)
     png_dir = Path(png_dir)
     cluster_dir = output_dir / "05_cluster_diagnostics"
-    roi_dir = output_dir / "06_roi_candidates"
-    class_dir = output_dir / "03_diffraction_classes"
-    orientation_dir = output_dir / "04_orientation_preview"
+    roi_dir = output_dir / "roi_candidates"
+    class_dir = output_dir / "diffraction_classes"
+    orientation_dir = output_dir / "orientation"
     cluster_dir.mkdir(parents=True, exist_ok=True)
     roi_dir.mkdir(parents=True, exist_ok=True)
 
     labels = phase.labels
-    cluster_ids = sorted(int(v) for v in np.unique(labels))
+    cluster_ids = sorted(int(v) for v in np.unique(labels) if v >= 0)
 
     # --- Cluster mean diffraction patterns ---------------------------------
     cluster_mean_dps = cluster_mean_diffraction(dataset, labels, cluster_ids, block_shape)
@@ -77,6 +77,7 @@ def run_stage1_diagnostics(
     # --- Cluster radial profiles -------------------------------------------
     radial_mean, radial_std = cluster_radial_profiles(fingerprints.profiles, labels, cluster_ids)
     np.save(cluster_dir / "cluster_mean_radial_profiles.npy", radial_mean)
+    np.save(class_dir / "cluster_mean_radial_profiles.npy", radial_mean)
     np.save(cluster_dir / "cluster_radial_profile_std.npy", radial_std)
     save_lines_png(png_dir / "cluster_mean_radial_profiles.png", fingerprints.radii, radial_mean)
     save_lines_png(cluster_dir / "cluster_mean_radial_profiles.png", fingerprints.radii, radial_mean)
@@ -86,6 +87,7 @@ def run_stage1_diagnostics(
     # --- Cluster virtual-image statistics ----------------------------------
     stats_rows = cluster_virtual_statistics(labels, virtual, cluster_ids)
     write_cluster_summary(cluster_dir, stats_rows)
+    write_cluster_summary(class_dir, stats_rows)
     save_bar_png(png_dir / "cluster_virtual_image_statistics.png", stats_bar_values(stats_rows))
     save_bar_png(cluster_dir / "cluster_virtual_image_statistics.png", stats_bar_values(stats_rows))
     ring_ratio_outputs = ring_ratio_maps(virtual, cluster_dir, png_dir)
