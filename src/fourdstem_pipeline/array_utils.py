@@ -27,11 +27,16 @@ def normalize_rows(matrix: np.ndarray, eps: float = 1e-12) -> np.ndarray:
 
 
 def parse_roi(roi: tuple[int, int, int, int] | list[int] | None, shape: tuple[int, int]) -> tuple[slice, slice]:
+    """Parse a ``[y0, y1, x0, x1]`` ROI into ``(y_slice, x_slice)``.
+
+    Follows the unified data contract ``bbox_order: y0_y1_x0_x1``.
+    Pass ``None`` to cover the full *shape*.
+    """
     if roi is None:
         return slice(0, shape[0]), slice(0, shape[1])
-    y0, x0, y1, x1 = [int(v) for v in roi]
+    y0, y1, x0, x1 = [int(v) for v in roi]
     y0 = max(0, min(y0, shape[0]))
-    x0 = max(0, min(x0, shape[1]))
     y1 = max(y0, min(y1, shape[0]))
+    x0 = max(0, min(x0, shape[1]))
     x1 = max(x0, min(x1, shape[1]))
     return slice(y0, y1), slice(x0, x1)

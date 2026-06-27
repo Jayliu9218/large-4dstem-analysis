@@ -51,16 +51,31 @@ class DatasetHandle:
     def chunks(self) -> Any | None:
         return getattr(self.data, "chunks", None)
 
+    @property
+    def source_backend(self) -> str:
+        return str(self.metadata.get("source_backend", self.source))
+
+    @property
+    def axes(self) -> list[dict[str, Any]]:
+        axes = self.metadata.get("axes", [])
+        return axes if isinstance(axes, list) else []
+
     def describe(self) -> dict[str, Any]:
         return {
             "source": self.source,
+            "source_backend": self.source_backend,
             "shape": self.shape,
             "navigation_shape": self.navigation_shape,
+            "scan_shape": self.metadata.get("scan_shape", self.navigation_shape),
             "signal_shape": self.signal_shape,
+            "detector_shape": self.metadata.get("detector_shape", self.signal_shape),
             "dtype": self.dtype,
             "chunks": self.chunks,
             "nbytes_estimate": self.nbytes_estimate,
             "path": self.metadata.get("path"),
+            "axes": self.axes,
+            "pyxem_available": self.metadata.get("pyxem_available"),
+            "pyxem_signal_type": self.metadata.get("pyxem_signal_type"),
         }
 
 

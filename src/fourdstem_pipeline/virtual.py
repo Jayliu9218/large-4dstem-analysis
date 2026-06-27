@@ -7,6 +7,9 @@ import numpy as np
 
 from .array_utils import as_numpy_block, iter_navigation_slices
 from .dataset import DatasetHandle, save_jsonable_metadata
+from .logging import get_logger, log_block_progress
+
+log = get_logger(__name__)
 
 
 @dataclass(slots=True)
@@ -26,7 +29,7 @@ def compute_virtual_images(
     output_dir: str | Path | None = None,
     block_shape: tuple[int, int] = (8, 8),
 ) -> VirtualImageResult:
-    """Compute virtual detector images and diffraction previews in blocks."""
+    """Compute virtual detector images and diffraction previews in navigation blocks."""
     nav_shape = dataset.navigation_shape
     sig_shape = dataset.signal_shape
     images = {name: np.zeros(nav_shape, dtype=np.float32) for name in masks}
@@ -37,7 +40,12 @@ def compute_virtual_images(
     n_patterns = 0
 
     yy, xx = np.indices(sig_shape)
-    for ys, xs in iter_navigation_slices(nav_shape, block_shape):
+    blocks = list(iter_navigation_slices(nav_shape, block_shape))
+    n_blocks = len(blocks)
+    log.info("Computing %d virtual images across %d navigation blocks (block_shape=%s)", len(masks), n_blocks, block_shape)
+
+    for idx, (ys, xs) in enumerate(blocks, start=1):
+        log_block_progress(log, block=idx, total_blocks=n_blocks, stage="virtual")
         block = as_numpy_block(dataset.data[ys, xs, :, :]).astype(np.float32, copy=False)
         for name, mask in masks.items():
             images[name][ys, xs] = block[..., mask].sum(axis=-1)

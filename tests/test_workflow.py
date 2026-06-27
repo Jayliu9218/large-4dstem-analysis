@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import shutil
+import json
 from pathlib import Path
 import sys
 
@@ -10,11 +11,13 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from fourdstem_pipeline import (
+    apply_preprocess,
     build_annular_masks,
     compute_radial_fingerprints,
     compute_virtual_images,
     load_dataset,
     run_orientation_preview,
+    run_workflow,
     screen_phases,
 )
 
@@ -35,6 +38,24 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(dataset.navigation_shape, (16, 16))
         self.assertEqual(dataset.signal_shape, (64, 64))
         self.assertEqual(dataset.describe()["source"], "synthetic")
+        self.assertEqual(dataset.describe()["source_backend"], "synthetic")
+
+    def test_numpy_loaders_do_not_require_pyxem(self):
+        data = np.zeros((3, 4, 8, 10), dtype=np.float32)
+        npy_path = self.output_dir / "scan.npy"
+        npz_path = self.output_dir / "scan.npz"
+        np.save(npy_path, data)
+        np.savez_compressed(npz_path, data=data + 1)
+
+        npy = load_dataset(npy_path, backend="numpy")
+        npz = load_dataset(npz_path, backend="numpy")
+
+        self.assertEqual(npy.navigation_shape, (3, 4))
+        self.assertEqual(npy.signal_shape, (8, 10))
+        self.assertEqual(npy.describe()["source_backend"], "numpy")
+        self.assertEqual(npz.navigation_shape, (3, 4))
+        self.assertEqual(npz.signal_shape, (8, 10))
+        self.assertEqual(npz.describe()["source_backend"], "numpy")
 
     def test_virtual_images_have_navigation_shape(self):
         dataset = load_dataset("synthetic://demo")
@@ -79,7 +100,7 @@ class WorkflowTests(unittest.TestCase):
         result = run_orientation_preview(
             dataset,
             binning=(2, 2),
-            roi=(4, 4, 12, 12),
+            roi=(4, 12, 4, 12),
             confidence_threshold=0.0,
             output_dir=self.output_dir,
         )
@@ -88,6 +109,84 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.score.shape, (4, 4))
         self.assertTrue(np.all(result.score >= 0))
         self.assertTrue((self.output_dir / "orientation_index.npy").exists())
+
+    def test_preprocess_changes_navigation_and_signal_shapes(self):
+        dataset = load_dataset("synthetic://demo")
+        preprocessed = apply_preprocess(dataset, q_crop=[8, 56, 4, 60], q_bin=2, r_bin=4)
+        self.assertEqual(preprocessed.navigation_shape, (4, 4))
+        self.assertEqual(preprocessed.signal_shape, (24, 28))
+        block = preprocessed.data[:2, :2, :, :]
+        self.assertEqual(block.shape, (2, 2, 24, 28))
+
+    def test_run_workflow_synthetic_config(self):
+        config = {
+            "project": {"name": "test", "output_dir": str(self.output_dir)},
+            "data": {"path": "synthetic://demo", "lazy": True, "chunks": {"navigation": [8, 8], "signal": [64, 64]}},
+            "preprocess": {"q_crop": None, "q_bin": 1, "r_bin": 1},
+            "geometry": {"center": None, "radial_bins": 24},
+            "virtual_images": {
+                "masks": {
+                    "bf": {"inner_radius": 0, "outer_radius": 8},
+                    "adf": {"inner_radius": 10, "outer_radius": 22},
+                    "ring_1": {"inner_radius": 8, "outer_radius": 16},
+                    "ring_2": {"inner_radius": 16, "outer_radius": 28},
+                    "ring_3": {"inner_radius": 28, "outer_radius": 31},
+                }
+            },
+            "phase_screening": {"method": "pca_nmf_cluster", "n_components": 3, "n_clusters": 3, "candidate_phases": []},
+            "orientation": {"preview_binning": [2, 2], "roi": [4, 12, 4, 12], "confidence_threshold": 0.0},
+            "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
+        }
+        result = run_workflow(config)
+        self.assertEqual(result.dataset.navigation_shape, (16, 16))
+        self.assertTrue((self.output_dir / "workflow_summary.json").exists())
+        self.assertTrue((self.output_dir / "stage1_summary.json").exists())
+        self.assertTrue((self.output_dir / "data_contract.json").exists())
+        self.assertTrue((self.output_dir / "preprocess_info.json").exists())
+        self.assertTrue((self.output_dir / "virtual" / "virtual_bf.npy").exists())
+        self.assertTrue((self.output_dir / "virtual" / "virtual_images.npz").exists())
+        self.assertTrue((self.output_dir / "fingerprints" / "radial_fingerprints.npy").exists())
+        self.assertTrue((self.output_dir / "fingerprints" / "radial_axis.npy").exists())
+        self.assertTrue((self.output_dir / "diffraction_classes" / "diffraction_class_labels.npy").exists())
+        self.assertTrue((self.output_dir / "diffraction_classes" / "diffraction_class_labels_cleaned.npy").exists())
+        self.assertTrue((self.output_dir / "diffraction_classes" / "cluster_summary.csv").exists())
+        self.assertTrue((self.output_dir / "diffraction_classes" / "cluster_mean_radial_profiles.npy").exists())
+        self.assertTrue((self.output_dir / "orientation" / "orientation_index.npy").exists())
+        self.assertTrue((self.output_dir / "05_cluster_diagnostics" / "cluster_summary.csv").exists())
+        self.assertTrue((self.output_dir / "05_cluster_diagnostics" / "cluster_cleaned_labels.npy").exists())
+        self.assertTrue((self.output_dir / "05_cluster_diagnostics" / "ring_2_over_ring_1.npy").exists())
+        self.assertTrue((self.output_dir / "05_cluster_diagnostics" / "cluster_vs_orientation.csv").exists())
+        self.assertTrue((self.output_dir / "roi_candidates" / "roi_candidates.yaml").exists())
+        self.assertTrue((self.output_dir / "report.html").exists())
+
+    def test_run_workflow_resolves_directory_input(self):
+        data_dir = self.output_dir / "data"
+        data_dir.mkdir()
+        yy, xx = np.indices((16, 16))
+        data = np.empty((4, 4, 16, 16), dtype=np.float32)
+        for iy in range(4):
+            for ix in range(4):
+                data[iy, ix] = np.exp(-0.5 * ((np.sqrt((yy - 8) ** 2 + (xx - 8) ** 2) - 3 - iy) / 1.5) ** 2)
+        np.save(data_dir / "scan_b.npy", data + 1)
+        np.save(data_dir / "scan_a.npy", data)
+        config = {
+            "project": {"name": "test", "output_dir": str(self.output_dir / "run")},
+            "data": {"backend": "hyperspy_pyxem", "directory": str(data_dir), "pattern": "*.npy", "index": 0, "lazy": True},
+            "preprocess": {"q_crop": None, "q_bin": 1, "r_bin": 1},
+            "geometry": {"center": None, "radial_bins": 8},
+            "virtual_images": {"masks": {"bf": {"inner_radius": 0, "outer_radius": 4}}},
+            "phase_screening": {"method": "pca_nmf_cluster", "n_components": 2, "n_clusters": 2, "candidate_phases": []},
+            "orientation": {"preview_binning": [2, 2], "roi": None, "confidence_threshold": 0.0},
+            "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
+        }
+        result = run_workflow(config)
+        self.assertTrue(result.dataset.metadata["path"].endswith("scan_a.npy"))
+        self.assertTrue((self.output_dir / "run" / "workflow_summary.json").exists())
+        summary = json.loads((self.output_dir / "run" / "workflow_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["data_config"]["backend"], "hyperspy_pyxem")
+        self.assertEqual(summary["dataset"]["source_backend"], "hyperspy_pyxem")
 
 
 if __name__ == "__main__":

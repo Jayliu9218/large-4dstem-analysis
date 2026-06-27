@@ -8,6 +8,9 @@ import numpy as np
 
 from .array_utils import as_numpy_block, iter_navigation_slices, normalize_rows, parse_roi
 from .dataset import DatasetHandle
+from .logging import get_logger, log_block_progress
+
+log = get_logger(__name__)
 
 
 @dataclass(slots=True)
@@ -46,19 +49,25 @@ def run_orientation_preview(
     phase_label = np.zeros(out_binned, dtype=np.int16)
     score = np.zeros(out_binned, dtype=np.float32)
 
-    for ys, xs in iter_navigation_slices(out_binned, block_shape):
+    blocks = list(iter_navigation_slices(out_binned, block_shape))
+    n_blocks = len(blocks)
+    mode = "template matching" if templates is not None else "COM-angle proxy"
+    log.info("Orientation preview (%s) across %d blocks (binning=%s)", mode, n_blocks, binning)
+
+    for idx, (ys, xs) in enumerate(blocks, start=1):
+        log_block_progress(log, block=idx, total_blocks=n_blocks, stage="orientation")
         src_y = slice(y_slice.start + ys.start * by, min(y_slice.start + ys.stop * by, y_slice.stop))
         src_x = slice(x_slice.start + xs.start * bx, min(x_slice.start + xs.stop * bx, x_slice.stop))
         block = as_numpy_block(dataset.data[src_y, src_x, :, :]).astype(np.float32, copy=False)
         patterns = _bin_navigation(block, by, bx).reshape((-1,) + dataset.signal_shape)
         if templates is not None:
-            idx, scr = _match_templates(patterns, templates)
-            orientation_index[ys, xs] = idx.reshape((ys.stop - ys.start, xs.stop - xs.start))
-            phase_label[ys, xs] = template_phases[idx].reshape((ys.stop - ys.start, xs.stop - xs.start))
+            idx_match, scr = _match_templates(patterns, templates)
+            orientation_index[ys, xs] = idx_match.reshape((ys.stop - ys.start, xs.stop - xs.start))
+            phase_label[ys, xs] = template_phases[idx_match].reshape((ys.stop - ys.start, xs.stop - xs.start))
             score[ys, xs] = scr.reshape((ys.stop - ys.start, xs.stop - xs.start))
         else:
-            idx, scr = _com_angle_preview(patterns)
-            orientation_index[ys, xs] = idx.reshape((ys.stop - ys.start, xs.stop - xs.start))
+            idx_match, scr = _com_angle_preview(patterns)
+            orientation_index[ys, xs] = idx_match.reshape((ys.stop - ys.start, xs.stop - xs.start))
             score[ys, xs] = scr.reshape((ys.stop - ys.start, xs.stop - xs.start))
 
     low_confidence_mask = score < float(confidence_threshold)
