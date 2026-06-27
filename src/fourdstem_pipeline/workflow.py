@@ -380,6 +380,12 @@ def run_workflow(
         "data_contract": data_contract.to_dict(),
         "provenance": provenance,
         "qc": qc_result.to_dict(),
+        "dependencies": {
+            "source_backend": dataset.metadata.get("source_backend", "unknown") if dataset else "none",
+            "pyxem_available": dataset.metadata.get("pyxem_available", False) if dataset else False,
+            "pyxem_signal_type": dataset.metadata.get("pyxem_signal_type") if dataset else None,
+            "py4DSTEM_used": roi_bragg is not None,
+        },
         "outputs": {
             "virtual": str(virtual_dir),
             "fingerprints": str(fingerprints_dir),
@@ -427,6 +433,7 @@ def run_workflow(
         data_contract=data_contract,
         cfg=cfg,
         qc_result=qc_result,
+        roi_bragg=roi_bragg,
     )
 
     try:
@@ -492,6 +499,7 @@ def _save_stage1_outputs(
     data_contract: DataContract,
     cfg: dict[str, Any],
     qc_result: QCResult,
+    roi_bragg: dict[str, Any] | None = None,
 ) -> None:
     """Write the stable Stage-1 → Stage-2 file interface.
 
@@ -564,6 +572,12 @@ def _save_stage1_outputs(
         "qc_summary_path": "qc_summary.json",
         "cluster_summary_path": "fingerprint_classes/cluster_summary.csv",
         "cluster_mean_radial_profiles_path": "fingerprint_classes/cluster_mean_radial_profiles.npy",
+        "dependencies": {
+            "source_backend": dataset.metadata.get("source_backend", "unknown") if dataset else "none",
+            "pyxem_available": dataset.metadata.get("pyxem_available", False) if dataset else False,
+            "pyxem_signal_type": dataset.metadata.get("pyxem_signal_type") if dataset else None,
+            "py4DSTEM_used": roi_bragg is not None,
+        },
     }
     (output_dir / "stage1_summary.json").write_text(
         _json.dumps(stage1_summary, indent=2, default=str), encoding="utf-8",

@@ -4,6 +4,8 @@
     Execute the full Stage-1 workflow.
 ``fourdstem-dry-run``
     Validate configuration and estimate resources without loading data.
+``fourdstem-stage2``
+    Execute Stage 2A ROI Bragg detection on a Stage-1 output directory.
 """
 
 from __future__ import annotations
@@ -84,6 +86,51 @@ def dry_run() -> None:
     # Exit code
     if result["status"] == "FAIL":
         sys.exit(1)
+
+
+def stage2() -> None:
+    """``fourdstem-stage2`` — execute Stage 2A ROI Bragg detection."""
+    parser = argparse.ArgumentParser(
+        description="4D-STEM Stage 2A: ROI Bragg Detection",
+    )
+    parser.add_argument(
+        "--config",
+        default="configs/stage2_roi_bragg.yaml",
+        help="Path to Stage 2 YAML configuration  [default: configs/stage2_roi_bragg.yaml]",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging verbosity  [default: INFO]",
+    )
+    args = parser.parse_args()
+
+    from .logging import configure_pipeline_logging
+    from .stage2 import run_stage2
+
+    configure_pipeline_logging(level=args.log_level)
+
+    try:
+        result = run_stage2(config=args.config)
+    except Exception as exc:
+        print(f"\nStage 2A failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    n_total = len(result.roi_results)
+    n_ok = result.n_success
+    n_fail = result.n_failed
+    total_peaks = sum(r.n_peaks for r in result.roi_results if r.error is None)
+
+    print(f"\nStage 2A complete: {n_ok}/{n_total} ROIs succeeded, {total_peaks} total Bragg peaks.")
+    if n_fail > 0:
+        print(f"  {n_fail} ROI(s) failed:", file=sys.stderr)
+        for r in result.roi_results:
+            if r.error:
+                print(f"    - {r.name}: {r.error}", file=sys.stderr)
+        sys.exit(1)
+    else:
+        print(f"  Output: {result.output_dir}")
 
 
 # ---------------------------------------------------------------------------

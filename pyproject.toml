@@ -17,6 +17,7 @@ dependencies = [
 [project.scripts]
 fourdstem-run = "fourdstem_pipeline.cli:run"
 fourdstem-dry-run = "fourdstem_pipeline.cli:dry_run"
+fourdstem-stage2 = "fourdstem_pipeline.cli:stage2"
 
 [project.optional-dependencies]
 large-data = [

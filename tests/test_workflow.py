@@ -11,11 +11,15 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from fourdstem_pipeline import (
+    Stage1Manifest,
+    Stage1ManifestLoadError,
     apply_preprocess,
     build_annular_masks,
     compute_radial_fingerprints,
     compute_virtual_images,
     load_dataset,
+    load_roi_candidates,
+    load_stage1_manifest,
     run_orientation_preview,
     run_stage1_diagnostics,
     run_workflow,
@@ -366,6 +370,455 @@ class WorkflowTests(unittest.TestCase):
         wf_result = run_workflow(config)
         report_text = wf_result.report_path.read_text(encoding="utf-8")
         self.assertNotIn("diffraction-class", report_text)
+
+
+    # ------------------------------------------------------------------
+    # Provenance / dependency reporting
+    # ------------------------------------------------------------------
+
+    def test_provenance_reports_scikit_learn_not_sklearn(self):
+        """provenance.json reports 'scikit-learn' (the package name), not 'sklearn'."""
+        config = {
+            "project": {"name": "test_prov", "output_dir": str(self.output_dir)},
+            "data": {"path": "synthetic://demo", "lazy": True},
+            "preprocess": {"q_crop": None, "q_bin": 1, "r_bin": 1},
+            "geometry": {"center": None, "radial_bins": 8},
+            "virtual_images": {"masks": {"bf": {"inner_radius": 0, "outer_radius": 4}}},
+            "phase_screening": {"method": "pca_nmf_cluster", "n_components": 2, "n_clusters": 2, "candidate_phases": []},
+            "orientation": {"preview_binning": [2, 2], "roi": [4, 12, 4, 12], "confidence_threshold": 0.0},
+            "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
+        }
+        run_workflow(config)
+        prov_path = self.output_dir / "provenance.json"
+        self.assertTrue(prov_path.exists())
+        prov = json.loads(prov_path.read_text(encoding="utf-8"))
+        packages = prov.get("packages", {})
+        # scikit-learn should be reported (not sklearn)
+        self.assertIn("scikit-learn", packages)
+        self.assertNotIn("sklearn", packages)
+        self.assertIsNotNone(packages["scikit-learn"],
+                             "scikit-learn should report a version when installed")
+
+    def test_report_has_runtime_dependency_availability_section(self):
+        """Both MD and HTML reports use 'Runtime Dependency Availability' not 'Package Versions'."""
+        config = {
+            "project": {"name": "test_dep", "output_dir": str(self.output_dir)},
+            "data": {"path": "synthetic://demo", "lazy": True},
+            "preprocess": {"q_crop": None, "q_bin": 1, "r_bin": 1},
+            "geometry": {"center": None, "radial_bins": 8},
+            "virtual_images": {"masks": {"bf": {"inner_radius": 0, "outer_radius": 4}}},
+            "phase_screening": {"method": "pca_nmf_cluster", "n_components": 2, "n_clusters": 2, "candidate_phases": []},
+            "orientation": {"preview_binning": [2, 2], "roi": [4, 12, 4, 12], "confidence_threshold": 0.0},
+            "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
+        }
+        result = run_workflow(config)
+
+        md_text = result.report_path.read_text(encoding="utf-8")
+        self.assertIn("Runtime Dependency Availability", md_text)
+        self.assertNotIn("Package Versions", md_text)
+
+        html_path = result.report_path.with_suffix(".html")
+        html_text = html_path.read_text(encoding="utf-8")
+        self.assertIn("Runtime Dependency Availability", html_text)
+        self.assertNotIn("Package Versions", html_text)
+
+    def test_summary_includes_dependency_fields(self):
+        """workflow_summary.json includes 'dependencies' with pyxem/py4DSTEM info."""
+        config = {
+            "project": {"name": "test_dep2", "output_dir": str(self.output_dir)},
+            "data": {"path": "synthetic://demo", "lazy": True},
+            "preprocess": {"q_crop": None, "q_bin": 1, "r_bin": 1},
+            "geometry": {"center": None, "radial_bins": 8},
+            "virtual_images": {"masks": {"bf": {"inner_radius": 0, "outer_radius": 4}}},
+            "phase_screening": {"method": "pca_nmf_cluster", "n_components": 2, "n_clusters": 2, "candidate_phases": []},
+            "orientation": {"preview_binning": [2, 2], "roi": [4, 12, 4, 12], "confidence_threshold": 0.0},
+            "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
+        }
+        run_workflow(config)
+        summary_path = self.output_dir / "workflow_summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+        deps = summary.get("dependencies", {})
+        self.assertIn("pyxem_available", deps)
+        self.assertIn("pyxem_signal_type", deps)
+        self.assertIn("py4DSTEM_used", deps)
+        self.assertIn("source_backend", deps)
+        # py4DSTEM_used should be False since roi_bragg is disabled
+        self.assertFalse(deps["py4DSTEM_used"])
+
+        # stage1_summary.json should also include dependencies
+        s1_path = self.output_dir / "stage1_summary.json"
+        s1 = json.loads(s1_path.read_text(encoding="utf-8"))
+        self.assertIn("dependencies", s1)
+
+    def test_provenance_pyxem_reports_not_installed(self):
+        """When pyxem is not installed, provenance reports it as null/not-installed."""
+        from fourdstem_pipeline.provenance import _installed_packages
+
+        packages = _installed_packages()
+        self.assertIn("pyxem", packages)
+        # pyxem may or may not be installed in test env, but key should exist
+        if packages["pyxem"] is None:
+            # Verify the report renders "not installed" label
+            from fourdstem_pipeline.export import _render_package_versions
+            rendered = _render_package_versions(packages)
+            self.assertIn("not installed", rendered)
+
+    # ------------------------------------------------------------------
+    # Stage1Manifest contract validation
+    # ------------------------------------------------------------------
+
+    def test_stage1_manifest_loads_valid_output(self):
+        """Stage1Manifest.load succeeds on a valid Stage-1 output directory."""
+        config = {
+            "project": {"name": "test_manifest", "output_dir": str(self.output_dir)},
+            "data": {"path": "synthetic://demo", "lazy": True},
+            "preprocess": {"q_crop": None, "q_bin": 1, "r_bin": 1},
+            "geometry": {"center": None, "radial_bins": 8},
+            "virtual_images": {"masks": {"bf": {"inner_radius": 0, "outer_radius": 4}}},
+            "phase_screening": {"method": "pca_nmf_cluster", "n_components": 2, "n_clusters": 2, "candidate_phases": []},
+            "orientation": {"preview_binning": [2, 2], "roi": [4, 12, 4, 12], "confidence_threshold": 0.0},
+            "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
+        }
+        run_workflow(config)
+        manifest = Stage1Manifest.load(self.output_dir)
+        self.assertEqual(manifest.run_name, "test_manifest")
+        self.assertEqual(manifest.nav_shape, [16, 16])
+        self.assertEqual(manifest.sig_shape, [64, 64])
+        self.assertEqual(manifest.qc_status, "PASS")
+        self.assertTrue(manifest.labels_path.exists())
+        self.assertTrue(manifest.roi_candidates_path.exists())
+        self.assertTrue(manifest.virtual_images_path.exists())
+        self.assertTrue(manifest.fingerprints_path.exists())
+        self.assertTrue(manifest.radial_axis_path.exists())
+        self.assertTrue(manifest.data_contract_path.exists())
+        self.assertTrue(manifest.provenance_path.exists())
+        self.assertTrue(manifest.qc_summary_path.exists())
+        # Convenience accessors
+        self.assertTrue(manifest.has_orientation)
+        self.assertTrue(manifest.qc_passed)
+
+    def test_stage1_manifest_missing_file_raises(self):
+        """Stage1Manifest.load raises when stage1_summary.json is absent."""
+        empty_dir = self.output_dir / "empty"
+        empty_dir.mkdir()
+        with self.assertRaises(Stage1ManifestLoadError) as ctx:
+            Stage1Manifest.load(empty_dir)
+        self.assertIn("not found", str(ctx.exception))
+
+    def test_stage1_manifest_missing_required_key_raises(self):
+        """Stage1Manifest.load raises when required keys are missing."""
+        manifest_dir = self.output_dir / "bad_manifest"
+        manifest_dir.mkdir()
+        bad = {
+            "run_name": "test",
+            "nav_shape": [16, 16],
+            # Missing sig_shape, labels_path, etc.
+        }
+        (manifest_dir / "stage1_summary.json").write_text(
+            json.dumps(bad), encoding="utf-8"
+        )
+        with self.assertRaises(Stage1ManifestLoadError) as ctx:
+            Stage1Manifest.load(manifest_dir)
+        self.assertIn("missing required keys", str(ctx.exception))
+
+    def test_stage1_manifest_fail_qc_raises(self):
+        """Stage1Manifest.load raises when qc_status is FAIL."""
+        manifest_dir = self.output_dir / "fail_qc"
+        manifest_dir.mkdir()
+        # Write a minimal manifest with FAIL status
+        fail_manifest = {
+            "run_name": "test_fail",
+            "nav_shape": [16, 16],
+            "sig_shape": [64, 64],
+            "qc_status": "FAIL",
+            "labels_path": "labels.npy",
+            "roi_candidates_path": "rois.yaml",
+            "virtual_images_path": "virtual.npz",
+            "fingerprints_path": "fprints.npy",
+            "radial_axis_path": "axis.npy",
+            "data_contract_path": "dc.json",
+            "provenance_path": "prov.json",
+            "qc_summary_path": "qc.json",
+        }
+        # Create dummy required files with valid content
+        for key in ["labels_path", "roi_candidates_path", "virtual_images_path",
+                     "fingerprints_path", "radial_axis_path",
+                     "provenance_path", "qc_summary_path"]:
+            p = manifest_dir / fail_manifest[key]
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("{}")
+        # data_contract.json must have valid bbox_order
+        (manifest_dir / "dc.json").write_text(
+            json.dumps({"bbox_order": "y0_y1_x0_x1"})
+        )
+        (manifest_dir / "stage1_summary.json").write_text(
+            json.dumps(fail_manifest), encoding="utf-8"
+        )
+        with self.assertRaises(Stage1ManifestLoadError) as ctx:
+            Stage1Manifest.load(manifest_dir)
+        self.assertIn("FAIL", str(ctx.exception))
+
+    def test_stage1_manifest_missing_file_on_disk_raises(self):
+        """Stage1Manifest.load raises when a required file path does not exist."""
+        manifest_dir = self.output_dir / "missing_file"
+        manifest_dir.mkdir()
+        ok_manifest = {
+            "run_name": "test",
+            "nav_shape": [16, 16],
+            "sig_shape": [64, 64],
+            "qc_status": "PASS",
+            "labels_path": "labels.npy",
+            "roi_candidates_path": "rois.yaml",
+            "virtual_images_path": "virtual.npz",
+            "fingerprints_path": "fprints.npy",
+            "radial_axis_path": "axis.npy",
+            "data_contract_path": "dc.json",
+            "provenance_path": "prov.json",
+            "qc_summary_path": "qc.json",
+        }
+        # Create only some of the required files (missing labels.npy)
+        for key in ["roi_candidates_path", "virtual_images_path",
+                     "fingerprints_path", "radial_axis_path", "data_contract_path",
+                     "provenance_path", "qc_summary_path"]:
+            p = manifest_dir / ok_manifest[key]
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("{}")
+        # labels.npy intentionally not created
+        (manifest_dir / "stage1_summary.json").write_text(
+            json.dumps(ok_manifest), encoding="utf-8"
+        )
+        with self.assertRaises(Stage1ManifestLoadError) as ctx:
+            Stage1Manifest.load(manifest_dir)
+        self.assertIn("does not exist", str(ctx.exception))
+
+    def test_load_stage1_manifest_convenience(self):
+        """load_stage1_manifest is a convenience wrapper."""
+        config = {
+            "project": {"name": "test_conv", "output_dir": str(self.output_dir)},
+            "data": {"path": "synthetic://demo", "lazy": True},
+            "preprocess": {"q_crop": None, "q_bin": 1, "r_bin": 1},
+            "geometry": {"center": None, "radial_bins": 8},
+            "virtual_images": {"masks": {"bf": {"inner_radius": 0, "outer_radius": 4}}},
+            "phase_screening": {"method": "pca_nmf_cluster", "n_components": 2, "n_clusters": 2, "candidate_phases": []},
+            "orientation": {"preview_binning": [2, 2], "roi": [4, 12, 4, 12], "confidence_threshold": 0.0},
+            "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
+        }
+        run_workflow(config)
+        manifest = load_stage1_manifest(self.output_dir)
+        self.assertIsInstance(manifest, Stage1Manifest)
+        self.assertEqual(manifest.run_name, "test_conv")
+
+    def test_stage1_summary_paths_are_relative(self):
+        """All path values in stage1_summary.json are relative (POSIX style)."""
+        config = {
+            "project": {"name": "test_rel", "output_dir": str(self.output_dir)},
+            "data": {"path": "synthetic://demo", "lazy": True},
+            "preprocess": {"q_crop": None, "q_bin": 1, "r_bin": 1},
+            "geometry": {"center": None, "radial_bins": 8},
+            "virtual_images": {"masks": {"bf": {"inner_radius": 0, "outer_radius": 4}}},
+            "phase_screening": {"method": "pca_nmf_cluster", "n_components": 2, "n_clusters": 2, "candidate_phases": []},
+            "orientation": {"preview_binning": [2, 2], "roi": [4, 12, 4, 12], "confidence_threshold": 0.0},
+            "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
+        }
+        run_workflow(config)
+        s1_path = self.output_dir / "stage1_summary.json"
+        s1 = json.loads(s1_path.read_text(encoding="utf-8"))
+        for key in ["labels_path", "roi_candidates_path", "virtual_images_path",
+                     "fingerprints_path", "radial_axis_path", "data_contract_path",
+                     "provenance_path", "qc_summary_path"]:
+            val = s1[key]
+            self.assertIsNotNone(val, f"{key} should not be None")
+            # Paths should use forward slashes (POSIX)
+            self.assertNotIn("\\", val, f"{key} should use forward slashes: {val}")
+            # Should not be absolute
+            self.assertFalse(
+                val.startswith("/") or (len(val) > 1 and val[1] == ":"),
+                f"{key} should be relative, got: {val}",
+            )
+
+    def test_roi_candidates_loadable(self):
+        """ROI candidates YAML can be loaded with load_roi_candidates."""
+        config = {
+            "project": {"name": "test_roi_load", "output_dir": str(self.output_dir)},
+            "data": {"path": "synthetic://demo", "lazy": True},
+            "preprocess": {"q_crop": None, "q_bin": 1, "r_bin": 1},
+            "geometry": {"center": None, "radial_bins": 8},
+            "virtual_images": {"masks": {"bf": {"inner_radius": 0, "outer_radius": 4}}},
+            "phase_screening": {"method": "pca_nmf_cluster", "n_components": 2, "n_clusters": 2, "candidate_phases": []},
+            "orientation": {"preview_binning": [2, 2], "roi": [4, 12, 4, 12], "confidence_threshold": 0.0},
+            "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
+        }
+        run_workflow(config)
+        yaml_path = self.output_dir / "roi_candidates" / "roi_candidates.yaml"
+        self.assertTrue(yaml_path.exists())
+        rois = load_roi_candidates(yaml_path)
+        self.assertIsInstance(rois, list)
+        self.assertGreater(len(rois), 0)
+        for roi in rois:
+            self.assertIn("name", roi)
+            self.assertIn("bbox", roi)
+            self.assertIn("center", roi)
+            self.assertIn("size", roi)
+            # bbox should be [y0, y1, x0, x1]
+            bbox = roi["bbox"]
+            self.assertEqual(len(bbox), 4)
+            self.assertLess(bbox[0], bbox[1], f"y0 < y1 violated: {bbox}")
+            self.assertLess(bbox[2], bbox[3], f"x0 < x1 violated: {bbox}")
+
+    # ------------------------------------------------------------------
+    # Stage 2A tests (no py4DSTEM required)
+    # ------------------------------------------------------------------
+
+    def test_stage2_config_validation(self):
+        """Stage 2 config must contain stage1_dir."""
+        from fourdstem_pipeline.stage2 import _load_stage2_config
+
+        cfg_dir = self.output_dir / "cfg"
+        cfg_dir.mkdir()
+        bad_path = cfg_dir / "bad.yaml"
+        bad_path.write_text("not_a_dir: true", encoding="utf-8")
+        with self.assertRaises(ValueError) as ctx:
+            _load_stage2_config(bad_path)
+        self.assertIn("stage1_dir", str(ctx.exception))
+
+    def test_stage2_missing_py4dstem_errors_clearly(self):
+        """Stage 2 run raises ImportError with a clear message when py4DSTEM is missing."""
+        import sys
+        from unittest.mock import patch
+        from fourdstem_pipeline.stage2 import run_stage2
+
+        # Create a valid Stage-1 output
+        config = {
+            "project": {"name": "test_s2_err", "output_dir": str(self.output_dir)},
+            "data": {"path": "synthetic://demo", "lazy": True},
+            "preprocess": {"q_crop": None, "q_bin": 1, "r_bin": 1},
+            "geometry": {"center": None, "radial_bins": 8},
+            "virtual_images": {"masks": {"bf": {"inner_radius": 0, "outer_radius": 4}}},
+            "phase_screening": {"method": "pca_nmf_cluster", "n_components": 2, "n_clusters": 2, "candidate_phases": []},
+            "orientation": {"preview_binning": [2, 2], "roi": [4, 12, 4, 12], "confidence_threshold": 0.0},
+            "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
+        }
+        run_workflow(config)
+
+        # Create a real data file so _resolve_data_path succeeds
+        import numpy as np
+        data_path = str(self.output_dir / "dummy.npy")
+        np.save(data_path, np.zeros((16, 16, 64, 64), dtype=np.float32))
+
+        stage2_cfg = {
+            "stage1_dir": str(self.output_dir),
+            "output_dir": str(self.output_dir / "stage2"),
+            "max_rois": 1,
+            "thin_r": 2,
+            "bin_q": 2,
+            "data_path": data_path,
+        }
+
+        # Simulate py4DSTEM not being installed
+        with patch.dict(sys.modules, {"py4DSTEM": None}):
+            # Also remove any cached import
+            for mod_key in list(sys.modules):
+                if "py4DSTEM" in mod_key or "py4dstem" in mod_key:
+                    sys.modules.pop(mod_key, None)
+            with self.assertRaises(ImportError) as ctx:
+                run_stage2(stage2_cfg)
+            self.assertIn("py4DSTEM", str(ctx.exception))
+
+    def test_stage2_manifest_validation_required(self):
+        """Stage 2 rejects a missing stage1_summary.json."""
+        from fourdstem_pipeline.stage2 import run_stage2
+        from fourdstem_pipeline.contracts import Stage1ManifestLoadError
+
+        empty_dir = self.output_dir / "no_s1"
+        empty_dir.mkdir()
+        stage2_cfg = {
+            "stage1_dir": str(empty_dir),
+            "output_dir": str(self.output_dir / "stage2"),
+        }
+        with self.assertRaises(Stage1ManifestLoadError):
+            run_stage2(stage2_cfg)
+
+    def test_stage2_run_creates_output_structure(self):
+        """Stage 2 with mocked py4DSTEM creates expected output structure."""
+        import sys
+        from unittest.mock import MagicMock, patch
+        import numpy as np
+
+        # Create valid Stage-1 output first
+        config = {
+            "project": {"name": "test_s2_struct", "output_dir": str(self.output_dir)},
+            "data": {"path": "synthetic://demo", "lazy": True},
+            "preprocess": {"q_crop": None, "q_bin": 1, "r_bin": 1},
+            "geometry": {"center": None, "radial_bins": 8},
+            "virtual_images": {"masks": {"bf": {"inner_radius": 0, "outer_radius": 4}}},
+            "phase_screening": {"method": "pca_nmf_cluster", "n_components": 2, "n_clusters": 2, "candidate_phases": []},
+            "orientation": {"preview_binning": [2, 2], "roi": [4, 12, 4, 12], "confidence_threshold": 0.0},
+            "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
+        }
+        run_workflow(config)
+
+        # Mock py4DSTEM to avoid needing the real package
+        mock_py4dstem = MagicMock()
+        mock_py4dstem.import_file.return_value = MagicMock(
+            data=np.zeros((16, 16, 64, 64), dtype=np.float32),
+            calibration=MagicMock(),
+        )
+        mock_dc = MagicMock()
+        mock_dc.bin_Q.return_value = mock_dc
+        mock_dc.data = np.zeros((4, 4, 32, 32), dtype=np.float32)
+        mock_bragg = MagicMock()
+        mock_hist = MagicMock()
+        mock_hist.data = np.zeros((64, 64), dtype=np.float32)
+        mock_bragg.histogram.return_value = mock_hist
+        mock_dc.find_Bragg_disks.return_value = mock_bragg
+        mock_py4dstem.DataCube.return_value = mock_dc
+
+        with patch.dict(sys.modules, {"py4DSTEM": mock_py4dstem}):
+            from fourdstem_pipeline.stage2 import run_stage2
+
+            stage2_cfg = {
+                "stage1_dir": str(self.output_dir),
+                "output_dir": str(self.output_dir / "stage2_mock"),
+                "max_rois": 1,
+                "thin_r": 2,
+                "bin_q": 2,
+                "data_path": str(self.output_dir / "dummy.mib"),
+            }
+            # Create a dummy data file so path resolution works
+            (self.output_dir / "dummy.mib").write_text("fake mib data")
+
+            result = run_stage2(stage2_cfg)
+            self.assertIsNotNone(result)
+            self.assertEqual(len(result.roi_results), 1)
+            self.assertIsNone(result.roi_results[0].error)
+
+        # Check output structure
+        s2_dir = self.output_dir / "stage2_mock"
+        self.assertTrue((s2_dir / "stage2_summary.json").exists())
+        self.assertTrue((s2_dir / "stage2_qc_summary.json").exists())
+        self.assertTrue((s2_dir / "provenance.json").exists())
+
+        summary = json.loads((s2_dir / "stage2_summary.json").read_text(encoding="utf-8"))
+        self.assertIn("roi_results", summary)
+        self.assertEqual(len(summary["roi_results"]), 1)
+        r = summary["roi_results"][0]
+        self.assertIn("n_bragg_peaks", r)
+        self.assertIn("bragg_vector_map_path", r)
+
+        qc = json.loads((s2_dir / "stage2_qc_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(qc["n_rois_total"], 1)
+        self.assertEqual(qc["n_rois_success"], 1)
+        self.assertEqual(qc["n_rois_failed"], 0)
 
 
 if __name__ == "__main__":

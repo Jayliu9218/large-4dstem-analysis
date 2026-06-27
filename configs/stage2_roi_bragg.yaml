@@ -1,0 +1,42 @@
+# Stage 2A: ROI Bragg Detection Configuration
+# ==============================================
+# Consumes a Stage-1 output directory and runs py4DSTEM Bragg-disk
+# detection on selected ROI candidates.
+#
+# Usage:
+#   fourdstem-stage2 --config configs/stage2_roi_bragg.yaml
+
+# Path to the Stage-1 output directory containing stage1_summary.json.
+stage1_dir: outputs/0617_4d_stage1
+
+# Optional: explicit path to the original 4D-STEM data file.  When
+# omitted, the input_path recorded in provenance.json is used.
+# data_path: data/0617-4d/2_512x512_ss7.6nm_0.55ms_c2 50um_CL91mm_0.75mrad_spot7_0.022nA_GL3_mag26000k_12b 0921.mib
+
+# Optional: override the default output directory.  Defaults to
+# <stage1_dir>/stage2/roi_bragg/.
+output_dir: null
+
+# ROI source: "roi_candidates" (default) reads the manifest's
+# roi_candidates.yaml, or provide an explicit path to a YAML file.
+roi_source: roi_candidates
+
+# Cap the number of ROIs processed (null = all candidates).
+max_rois: null
+
+# -- Extraction parameters --
+thin_r: 2    # Navigation thinning factor
+bin_q: 2     # Detector binning factor
+
+# py4DSTEM memory mode: "MEMMAP" (recommended for large files) or "RAM".
+mem: MEMMAP
+
+# -- py4DSTEM Bragg-disk detection parameters --
+corr_power: 1.0
+sigma_cc: 1
+edge_boundary: 10
+min_relative_intensity: 0.05
+min_peak_spacing: 4
+subpixel: poly
+max_num_peaks: 70
+cuda: false

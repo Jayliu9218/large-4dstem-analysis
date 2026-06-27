@@ -169,18 +169,31 @@ def _file_mtime(path: str | Path) -> str | None:
 
 
 def _installed_packages() -> dict[str, str | None]:
-    """Best-effort version lookup for optional dependencies."""
-    candidates = [
-        "numpy",
-        "scipy",
-        "sklearn",
-        "hyperspy",
-        "pyxem",
-        "py4DSTEM",
+    """Best-effort version lookup for optional dependencies.
+
+    Each key is displayed in the report as the user-facing package name.
+    The internal lookup name (e.g. ``scikit-learn`` for the ``sklearn``
+    import) is resolved automatically.
+    """
+    candidates: list[tuple[str, str | list[str]]] = [
+        ("numpy", "numpy"),
+        ("scipy", "scipy"),
+        ("scikit-learn", ["scikit-learn", "sklearn"]),
+        ("hyperspy", "hyperspy"),
+        ("pyxem", "pyxem"),
+        ("py4DSTEM", "py4DSTEM"),
     ]
     versions: dict[str, str | None] = {}
-    for name in candidates:
-        versions[name] = _try_package_version(name)
+    for display_name, lookup in candidates:
+        if isinstance(lookup, list):
+            version = None
+            for name in lookup:
+                version = _try_package_version(name)
+                if version is not None:
+                    break
+        else:
+            version = _try_package_version(lookup)
+        versions[display_name] = version
     return versions
 
 

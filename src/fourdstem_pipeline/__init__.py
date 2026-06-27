@@ -1,6 +1,7 @@
 """Notebook-first 4D-STEM analysis helpers."""
 
 from .config import load_workflow_config, resolve_data_config, validate_workflow_config
+from .contracts import DataContract, Stage1Manifest, Stage1ManifestLoadError
 from .dataset import DatasetHandle
 from .fingerprints import FingerprintResult, compute_radial_fingerprints
 from .loaders import load_dataset
@@ -9,18 +10,25 @@ from .masks import build_annular_masks
 from .orientation import OrientationResult, run_orientation_preview
 from .phase import PhaseScreeningResult, screen_phases
 from .preprocess import PreprocessedArray, PreprocessSpec, apply_preprocess
+from .roi_bragg import ROIBraggResult, Stage2Result, load_roi_candidates, run_roi_bragg_for_rois
+from .stage2 import load_stage1_manifest, run_stage2
 from .synthetic import make_synthetic_4dstem
 from .virtual import VirtualImageResult, compute_virtual_images
 from .diagnostics import run_stage1_diagnostics
 from .workflow import WorkflowResult, run_workflow
 
 __all__ = [
+    "DataContract",
     "DatasetHandle",
     "FingerprintResult",
     "OrientationResult",
     "PhaseScreeningResult",
     "PreprocessedArray",
     "PreprocessSpec",
+    "ROIBraggResult",
+    "Stage1Manifest",
+    "Stage1ManifestLoadError",
+    "Stage2Result",
     "VirtualImageResult",
     "WorkflowResult",
     "apply_preprocess",
@@ -30,11 +38,15 @@ __all__ = [
     "configure_pipeline_logging",
     "get_logger",
     "load_dataset",
+    "load_roi_candidates",
+    "load_stage1_manifest",
     "load_workflow_config",
     "make_synthetic_4dstem",
     "resolve_data_config",
     "run_orientation_preview",
+    "run_roi_bragg_for_rois",
     "run_stage1_diagnostics",
+    "run_stage2",
     "run_workflow",
     "screen_phases",
     "validate_workflow_config",

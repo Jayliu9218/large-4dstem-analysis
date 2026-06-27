@@ -322,7 +322,10 @@ def _render_report(summary: dict[str, Any], phase_labels: np.ndarray, *, base_di
         f"- Start time: `{provenance.get('start_time', 'unknown')}`",
         f"- End time: `{provenance.get('end_time', 'unknown')}`",
         "",
-        _render_package_versions(provenance.get("packages", {})),
+        _render_package_versions(
+            provenance.get("packages", {}),
+            summary.get("dependencies"),
+        ),
         "",
         "## Screening Settings",
         "",
@@ -472,7 +475,7 @@ def _render_html_report(summary: dict[str, Any], phase_labels: np.ndarray, *, ba
     body.extend(_html_data_summary(summary))
     body.extend(_html_label_summary(phase_labels))
     body.extend(_html_sample_mask(summary.get("sample_mask", {})))
-    body.extend(_html_provenance(summary.get("provenance", {})))
+    body.extend(_html_provenance(summary.get("provenance", {}), summary.get("dependencies")))
     body.extend(_html_png_grid(png, base_dir))
     body.extend(_html_diagnostic_tables(outputs.get("diagnostics", {}), base_dir))
     body.extend(
@@ -588,8 +591,8 @@ def _html_sample_mask(sample_mask: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _html_provenance(provenance: dict[str, Any]) -> list[str]:
-    """Render provenance as an HTML section."""
+def _html_provenance(provenance: dict[str, Any], dependencies: dict[str, Any] | None = None) -> list[str]:
+    """Render provenance as an HTML section, including dependency availability."""
     if not provenance:
         return []
     rows = [
@@ -615,15 +618,29 @@ def _html_provenance(provenance: dict[str, Any]) -> list[str]:
         )
     lines.append("</tbody></table>")
     if packages:
-        lines.append("<h3>Package Versions</h3>")
+        lines.append("<h3>Runtime Dependency Availability</h3>")
         lines.append("<table><tbody>")
         for name in sorted(packages):
             version = packages.get(name)
+            label = str(version) if version is not None else "not installed"
             lines.append(
                 f"<tr><th>{html.escape(name)}</th>"
-                f"<td><code>{html.escape(str(version) if version is not None else 'not installed')}</code></td></tr>"
+                f"<td><code>{html.escape(label)}</code></td></tr>"
             )
         lines.append("</tbody></table>")
+        # Runtime usage notes
+        if dependencies:
+            notes: list[str] = []
+            if not dependencies.get("pyxem_available", False) and packages.get("pyxem") is not None:
+                notes.append("pyxem is installed but was not used by this run.")
+            if not dependencies.get("py4DSTEM_used", False) and packages.get("py4DSTEM") is not None:
+                notes.append("py4DSTEM is installed but was not used by this run (roi_bragg disabled or failed).")
+            if dependencies.get("pyxem_signal_type"):
+                notes.append(f"HyperSpy signal set to <code>{html.escape(str(dependencies['pyxem_signal_type']))}</code> for pyxem compatibility.")
+            if dependencies.get("source_backend"):
+                notes.append(f"Data loaded via <code>{html.escape(str(dependencies['source_backend']))}</code> backend.")
+            if notes:
+                lines.append("<p>" + "<br>".join(notes) + "</p>")
     return lines
 
 
@@ -769,12 +786,41 @@ def _human_size(size: Any) -> str:
     return f"{size} TiB"
 
 
-def _render_package_versions(packages: dict[str, Any]) -> str:
-    """Render optional package versions as a Markdown list."""
+def _render_package_versions(packages: dict[str, Any], dependencies: dict[str, Any] | None = None) -> str:
+    """Render optional package versions as a Markdown list.
+
+    Distinguishes between packages that are *not installed* (version is
+    ``None``) and packages that were *not used* by this particular run
+    (version is known but the feature was never invoked).
+    """
     if not packages:
-        return "Package versions: not recorded"
-    items = [f"- `{name}`: `{version or 'not installed'}`" for name, version in sorted(packages.items())]
-    return "### Package Versions\n\n" + "\n".join(items)
+        return "### Runtime Dependency Availability\n\n_Dependency versions were not recorded._"
+
+    items: list[str] = []
+    for name, version in sorted(packages.items()):
+        status: str
+        if version is not None:
+            status = f"`{version}`"
+        else:
+            status = "`not installed`"
+        items.append(f"- `{name}`: {status}")
+
+    # Add runtime usage annotations when dependency info is available.
+    if dependencies:
+        deps_note: list[str] = []
+        if not dependencies.get("pyxem_available", False) and packages.get("pyxem") is not None:
+            deps_note.append("pyxem is installed but was not used by this run.")
+        if not dependencies.get("py4DSTEM_used", False) and packages.get("py4DSTEM") is not None:
+            deps_note.append("py4DSTEM is installed but was not used by this run (roi_bragg disabled or failed).")
+        if dependencies.get("pyxem_signal_type"):
+            deps_note.append(f"HyperSpy signal set to `{dependencies['pyxem_signal_type']}` for pyxem compatibility.")
+        if dependencies.get("source_backend"):
+            deps_note.append(f"Data loaded via `{dependencies['source_backend']}` backend.")
+        if deps_note:
+            items.append("")
+            items.extend(deps_note)
+
+    return "### Runtime Dependency Availability\n\n" + "\n".join(items)
 
 
 def _jsonable(value: Any) -> Any:
