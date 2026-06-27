@@ -71,6 +71,7 @@ def connected_component_diagnostics(
     cluster_ids: list[int],
     output_dir: Path,
     png_dir: Path,
+    class_dir: Path | None = None,
 ) -> dict[str, str]:
     rows = []
     cleaned = labels.copy()
@@ -97,14 +98,32 @@ def connected_component_diagnostics(
         writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+    np.save(output_dir / "cluster_cleaned_labels.npy", cleaned.astype(np.int16))
+    save_label_png(output_dir / "cluster_cleaned_labels.png", cleaned)
     save_label_png(png_dir / "cluster_cleaned_labels.png", cleaned)
+    class_outputs: dict[str, str] = {}
+    if class_dir is not None:
+        class_dir.mkdir(parents=True, exist_ok=True)
+        class_npy = class_dir / "diffraction_class_labels_cleaned.npy"
+        class_png = class_dir / "diffraction_class_labels_cleaned.png"
+        np.save(class_npy, cleaned.astype(np.int16))
+        save_label_png(class_png, cleaned)
+        class_outputs = {
+            "diffraction_class_labels_cleaned_npy": str(class_npy),
+            "diffraction_class_labels_cleaned_png": str(class_png),
+        }
     save_bar_png(
         png_dir / "cluster_area_histogram.png",
         np.asarray([[row["largest_component_size"], row["component_count"]] for row in rows], dtype=np.float32),
     )
     base = images.get("adf") if "adf" in images else next(iter(images.values()))
     save_png(png_dir / "cluster_boundary_overlay_on_adf.png", _boundary_overlay(base, labels))
-    return {"connected_components_csv": str(output_dir / "cluster_connected_components.csv")}
+    return {
+        "connected_components_csv": str(output_dir / "cluster_connected_components.csv"),
+        "cleaned_labels_npy": str(output_dir / "cluster_cleaned_labels.npy"),
+        "cleaned_labels_png": str(output_dir / "cluster_cleaned_labels.png"),
+        **class_outputs,
+    }
 
 
 def connected_components(mask: np.ndarray) -> list[list[tuple[int, int]]]:

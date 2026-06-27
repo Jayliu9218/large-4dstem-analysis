@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import html
 import json
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,10 @@ def save_summary(output_dir: str | Path, summary: dict[str, Any]) -> Path:
 def save_report(output_dir: str | Path, summary: dict[str, Any], phase_labels: np.ndarray) -> Path:
     path = Path(output_dir) / "report.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_render_report(summary, phase_labels, base_dir=path.parent), encoding="utf-8")
+    markdown = _render_report(summary, phase_labels, base_dir=path.parent)
+    path.write_text(markdown, encoding="utf-8")
+    html_path = path.with_suffix(".html")
+    html_path.write_text(_render_html_report(summary, phase_labels, base_dir=path.parent), encoding="utf-8")
     return path
 
 
@@ -298,8 +303,13 @@ def _render_report(summary: dict[str, Any], phase_labels: np.ndarray, *, base_di
     for key in [
         "diffraction_class_labels_annotated",
         "diffraction_class_labels",
+        "cluster_cleaned_labels",
         "cluster_mean_radial_profiles",
         "cluster_virtual_image_statistics",
+        "cluster_vs_orientation_heatmap",
+        "ring_2_over_ring_1",
+        "ring_3_over_ring_1",
+        "ring_3_over_ring_2",
         "roi_candidates_overlay",
         "virtual_bf",
         "virtual_adf",
@@ -318,6 +328,30 @@ def _render_report(summary: dict[str, Any], phase_labels: np.ndarray, *, base_di
             except ValueError:
                 link = png_path.as_posix()
             lines.append(f"- {key}: [{png_path.name}]({link})")
+
+    diagnostics = outputs.get("diagnostics", {}) if isinstance(outputs.get("diagnostics"), dict) else {}
+    lines.extend(["", "## Cluster Diagnostics", ""])
+    for title_text, path_text in [
+        ("Cluster virtual-image statistics", diagnostics.get("cluster_summary_csv")),
+        ("Connected-component cleanup", (diagnostics.get("connected_components") or {}).get("connected_components_csv") if isinstance(diagnostics.get("connected_components"), dict) else None),
+        ("Cluster vs orientation", (diagnostics.get("cluster_vs_orientation") or {}).get("csv") if isinstance(diagnostics.get("cluster_vs_orientation"), dict) else None),
+        ("K-sweep metrics", (diagnostics.get("k_sweep") or {}).get("metrics_csv") if isinstance(diagnostics.get("k_sweep"), dict) else None),
+    ]:
+        table = _csv_to_markdown(path_text, base_dir=base_dir, max_rows=12)
+        if table:
+            lines.extend([f"### {title_text}", "", table, ""])
+
+    roi_csv = (diagnostics.get("roi_outputs") or {}).get("csv") if isinstance(diagnostics.get("roi_outputs"), dict) else None
+    roi_table = _csv_to_markdown(roi_csv, base_dir=base_dir, max_rows=12)
+    if roi_table:
+        lines.extend(["## Stage 2 ROI Candidates", "", roi_table, ""])
+
+    ring_maps = diagnostics.get("ring_ratio_maps") if isinstance(diagnostics.get("ring_ratio_maps"), dict) else {}
+    if ring_maps:
+        lines.extend(["## Ring Ratio Map Arrays", ""])
+        for name, path_text in ring_maps.items():
+            lines.append(f"- {name}: `{path_text}`")
+        lines.append("")
 
     lines.extend(
         [
@@ -342,6 +376,174 @@ def _render_report(summary: dict[str, Any], phase_labels: np.ndarray, *, base_di
             "",
         ]
     )
+    return "\n".join(lines)
+
+
+def _render_html_report(summary: dict[str, Any], phase_labels: np.ndarray, *, base_dir: Path) -> str:
+    project = summary.get("project", {})
+    outputs = summary.get("outputs", {})
+    png = outputs.get("png", {}) if isinstance(outputs.get("png"), dict) else {}
+    title = str(project.get("name", "4D-STEM Diffraction-Class Screening Report"))
+    body = [
+        "<!doctype html>",
+        "<html><head><meta charset=\"utf-8\">",
+        f"<title>{html.escape(title)}</title>",
+        "<style>",
+        "body{font-family:Arial,sans-serif;margin:32px;line-height:1.45;color:#222}",
+        "h1,h2{margin-top:1.4em} table{border-collapse:collapse;margin:12px 0;max-width:100%}",
+        "th,td{border:1px solid #ccc;padding:6px 8px;text-align:right} th:first-child,td:first-child{text-align:left}",
+        ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px}",
+        "figure{margin:0} img{max-width:100%;border:1px solid #ddd} figcaption{font-size:13px;color:#555;margin-top:4px}",
+        "code{background:#f5f5f5;padding:1px 4px}",
+        "</style></head><body>",
+        f"<h1>{html.escape(title)}</h1>",
+    ]
+    body.extend(_html_data_summary(summary))
+    body.extend(_html_label_summary(phase_labels))
+    body.extend(_html_png_grid(png, base_dir))
+    body.extend(_html_diagnostic_tables(outputs.get("diagnostics", {}), base_dir))
+    body.extend(
+        [
+            "<h2>Interpretation Notes</h2>",
+            "<ul>",
+            "<li>Diffraction-class labels are unsupervised radial-fingerprint clusters, not final crystallographic phase assignments.</li>",
+            "<li>Use cluster mean DPs, radial profiles, virtual-image statistics, ring ratios, and orientation consistency to prioritize Stage 2 indexing.</li>",
+            "<li>Final phase assignment still requires py4DSTEM/pyxem validation with Bragg indexing or template matching.</li>",
+            "</ul>",
+            "</body></html>",
+        ]
+    )
+    return "\n".join(body)
+
+
+def _html_data_summary(summary: dict[str, Any]) -> list[str]:
+    data = summary.get("data_config", {})
+    dataset = summary.get("dataset", {})
+    shapes = summary.get("shapes", {})
+    rows = [
+        ("Source", data.get("path", dataset.get("path", "unknown"))),
+        ("Backend", dataset.get("source_backend", "unknown")),
+        ("Preprocessed shape", dataset.get("shape", "unknown")),
+        ("Navigation shape", dataset.get("navigation_shape", "unknown")),
+        ("Signal shape", dataset.get("signal_shape", "unknown")),
+        ("Radial fingerprints", shapes.get("radial_fingerprints", "unknown")),
+        ("Diffraction labels", shapes.get("diffraction_class_labels", "unknown")),
+        ("Orientation preview", shapes.get("orientation_index", "unknown")),
+    ]
+    lines = ["<h2>Data And Settings</h2>", "<table><tbody>"]
+    for key, value in rows:
+        lines.append(f"<tr><th>{html.escape(str(key))}</th><td><code>{html.escape(str(value))}</code></td></tr>")
+    lines.append("</tbody></table>")
+    return lines
+
+
+def _html_label_summary(phase_labels: np.ndarray) -> list[str]:
+    labels, counts = np.unique(np.asarray(phase_labels), return_counts=True)
+    total = max(int(counts.sum()), 1)
+    lines = ["<h2>Diffraction Classes</h2>", "<table><thead><tr><th>Cluster</th><th>Pixels</th><th>Fraction</th></tr></thead><tbody>"]
+    for label, count in zip(labels, counts):
+        lines.append(f"<tr><td>{int(label)}</td><td>{int(count)}</td><td>{int(count) / total:.3f}</td></tr>")
+    lines.append("</tbody></table>")
+    return lines
+
+
+def _html_png_grid(png: dict[str, Any], base_dir: Path) -> list[str]:
+    keys = [
+        "diffraction_class_labels_annotated",
+        "cluster_cleaned_labels",
+        "cluster_mean_radial_profiles",
+        "cluster_virtual_image_statistics",
+        "cluster_vs_orientation_heatmap",
+        "ring_2_over_ring_1",
+        "ring_3_over_ring_1",
+        "roi_candidates_overlay",
+        "mean_dp_with_center_marker",
+        "orientation_score_masked",
+        "k_sweep_metrics",
+    ]
+    lines = ["<h2>Visual Outputs</h2>", "<div class=\"grid\">"]
+    for key in keys:
+        if key not in png:
+            continue
+        path = Path(png[key])
+        try:
+            link = path.relative_to(base_dir).as_posix()
+        except ValueError:
+            link = path.as_posix()
+        lines.append(
+            "<figure>"
+            f"<img src=\"{html.escape(link)}\" alt=\"{html.escape(key)}\">"
+            f"<figcaption>{html.escape(key)}</figcaption>"
+            "</figure>"
+        )
+    lines.append("</div>")
+    return lines
+
+
+def _html_diagnostic_tables(diagnostics: Any, base_dir: Path) -> list[str]:
+    if not isinstance(diagnostics, dict):
+        return []
+    items = [
+        ("Cluster virtual-image statistics", diagnostics.get("cluster_summary_csv")),
+        ("Connected-component cleanup", (diagnostics.get("connected_components") or {}).get("connected_components_csv") if isinstance(diagnostics.get("connected_components"), dict) else None),
+        ("Cluster vs orientation", (diagnostics.get("cluster_vs_orientation") or {}).get("csv") if isinstance(diagnostics.get("cluster_vs_orientation"), dict) else None),
+        ("Stage 2 ROI candidates", (diagnostics.get("roi_outputs") or {}).get("csv") if isinstance(diagnostics.get("roi_outputs"), dict) else None),
+        ("K-sweep metrics", (diagnostics.get("k_sweep") or {}).get("metrics_csv") if isinstance(diagnostics.get("k_sweep"), dict) else None),
+    ]
+    lines = ["<h2>Diagnostic Tables</h2>"]
+    for title, path_text in items:
+        table = _csv_to_html(path_text, max_rows=12)
+        if table:
+            lines.extend([f"<h3>{html.escape(title)}</h3>", table])
+    return lines
+
+
+def _csv_to_markdown(path_text: Any, *, base_dir: Path, max_rows: int) -> str:
+    if not path_text:
+        return ""
+    path = Path(str(path_text))
+    if not path.exists():
+        return ""
+    with path.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    if not rows:
+        return ""
+    keys = list(rows[0])
+    lines = ["| " + " | ".join(keys) + " |", "| " + " | ".join(["---"] * len(keys)) + " |"]
+    for row in rows[:max_rows]:
+        lines.append("| " + " | ".join(str(row.get(key, "")) for key in keys) + " |")
+    if len(rows) > max_rows:
+        try:
+            link = path.relative_to(base_dir).as_posix()
+        except ValueError:
+            link = path.as_posix()
+        tail = [""] * len(keys)
+        tail[0] = "..."
+        if len(tail) > 1:
+            tail[1] = f"see [{path.name}]({link})"
+        lines.append("| " + " | ".join(tail) + " |")
+    return "\n".join(lines)
+
+
+def _csv_to_html(path_text: Any, *, max_rows: int) -> str:
+    if not path_text:
+        return ""
+    path = Path(str(path_text))
+    if not path.exists():
+        return ""
+    with path.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    if not rows:
+        return ""
+    keys = list(rows[0])
+    lines = ["<table><thead><tr>"]
+    lines.extend(f"<th>{html.escape(key)}</th>" for key in keys)
+    lines.extend(["</tr></thead><tbody>"])
+    for row in rows[:max_rows]:
+        lines.append("<tr>" + "".join(f"<td>{html.escape(str(row.get(key, '')))}</td>" for key in keys) + "</tr>")
+    if len(rows) > max_rows:
+        lines.append(f"<tr><td colspan=\"{len(keys)}\">Showing {max_rows} of {len(rows)} rows. Full CSV: {html.escape(path.name)}</td></tr>")
+    lines.append("</tbody></table>")
     return "\n".join(lines)
 
 

@@ -128,6 +128,9 @@ class WorkflowTests(unittest.TestCase):
                 "masks": {
                     "bf": {"inner_radius": 0, "outer_radius": 8},
                     "adf": {"inner_radius": 10, "outer_radius": 22},
+                    "ring_1": {"inner_radius": 8, "outer_radius": 16},
+                    "ring_2": {"inner_radius": 16, "outer_radius": 28},
+                    "ring_3": {"inner_radius": 28, "outer_radius": 31},
                 }
             },
             "phase_screening": {"method": "pca_nmf_cluster", "n_components": 3, "n_clusters": 3, "candidate_phases": []},
@@ -140,9 +143,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue((self.output_dir / "01_virtual_images" / "virtual_bf.npy").exists())
         self.assertTrue((self.output_dir / "02_fingerprints" / "radial_fingerprints.npy").exists())
         self.assertTrue((self.output_dir / "03_diffraction_classes" / "diffraction_class_labels.npy").exists())
+        self.assertTrue((self.output_dir / "03_diffraction_classes" / "diffraction_class_labels_cleaned.npy").exists())
         self.assertTrue((self.output_dir / "04_orientation_preview" / "orientation_index.npy").exists())
         self.assertTrue((self.output_dir / "05_cluster_diagnostics" / "cluster_summary.csv").exists())
+        self.assertTrue((self.output_dir / "05_cluster_diagnostics" / "cluster_cleaned_labels.npy").exists())
+        self.assertTrue((self.output_dir / "05_cluster_diagnostics" / "ring_2_over_ring_1.npy").exists())
+        self.assertTrue((self.output_dir / "05_cluster_diagnostics" / "cluster_vs_orientation.csv").exists())
         self.assertTrue((self.output_dir / "06_roi_candidates" / "roi_candidates.yaml").exists())
+        self.assertTrue((self.output_dir / "report.html").exists())
 
     def test_run_workflow_resolves_directory_input(self):
         data_dir = self.output_dir / "data"

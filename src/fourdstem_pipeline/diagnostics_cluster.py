@@ -17,6 +17,7 @@ from .array_utils import as_numpy_block, iter_navigation_slices
 from .dataset import DatasetHandle
 from .export import save_bar_png, save_label_png, save_lines_png, save_png
 from .fingerprints import FingerprintResult
+from .orientation import OrientationResult
 from .virtual import VirtualImageResult
 
 
@@ -146,6 +147,150 @@ def _format_value(value: Any) -> str:
 def stats_bar_values(rows: list[dict[str, float | int]]) -> np.ndarray:
     keys = ["mean_BF", "mean_ADF", "mean_HAADF", "mean_ring_1", "mean_ring_2", "mean_ring_3"]
     return np.asarray([[float(row.get(key, 0.0)) for key in keys] for row in rows], dtype=np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Ring-ratio maps
+# ---------------------------------------------------------------------------
+
+
+def ring_ratio_maps(
+    virtual: VirtualImageResult,
+    output_dir: Path,
+    png_dir: Path,
+) -> dict[str, str]:
+    pairs = [("ring_2", "ring_1"), ("ring_3", "ring_1"), ("ring_3", "ring_2")]
+    outputs: dict[str, str] = {}
+    for numerator, denominator in pairs:
+        if numerator not in virtual.images or denominator not in virtual.images:
+            continue
+        key = f"{numerator}_over_{denominator}"
+        ratio = virtual.images[numerator] / np.maximum(virtual.images[denominator], 1e-12)
+        npy_path = output_dir / f"{key}.npy"
+        np.save(npy_path, ratio.astype(np.float32))
+        save_png(output_dir / f"{key}.png", ratio)
+        save_png(png_dir / f"{key}.png", ratio)
+        outputs[key] = str(npy_path)
+    return outputs
+
+
+# ---------------------------------------------------------------------------
+# Cluster-vs-orientation table
+# ---------------------------------------------------------------------------
+
+
+def cluster_orientation_table(
+    labels: np.ndarray,
+    orientation: OrientationResult,
+    cluster_ids: list[int],
+    output_dir: Path,
+    png_dir: Path,
+) -> dict[str, str]:
+    orient = np.asarray(orientation.orientation_index)
+    score = np.asarray(orientation.score, dtype=np.float32)
+    y0, y1, x0, x1 = _orientation_extent(orientation, labels.shape)
+    scale_y = max((y1 - y0) / max(orient.shape[0], 1), 1e-12)
+    scale_x = max((x1 - x0) / max(orient.shape[1], 1), 1e-12)
+
+    rows: list[dict[str, float | int]] = []
+    for oy in range(orient.shape[0]):
+        ly0 = int(round(y0 + oy * scale_y))
+        ly1 = int(round(y0 + (oy + 1) * scale_y))
+        for ox in range(orient.shape[1]):
+            lx0 = int(round(x0 + ox * scale_x))
+            lx1 = int(round(x0 + (ox + 1) * scale_x))
+            region = labels[max(0, ly0):min(labels.shape[0], ly1), max(0, lx0):min(labels.shape[1], lx1)]
+            if region.size == 0:
+                continue
+            orientation_id = int(orient[oy, ox])
+            for cluster_id in cluster_ids:
+                count = int(np.sum(region == cluster_id))
+                if count == 0:
+                    continue
+                rows.append(
+                    {
+                        "cluster": cluster_id,
+                        "orientation_index": orientation_id,
+                        "pixel_count": count,
+                        "fraction_within_orientation_cell": float(count / region.size),
+                        "orientation_score": float(score[oy, ox]),
+                    }
+                )
+
+    grouped = _group_cluster_orientation_rows(rows)
+    csv_path = output_dir / "cluster_vs_orientation.csv"
+    md_path = output_dir / "cluster_vs_orientation.md"
+    keys = ["cluster", "orientation_index", "pixel_count", "fraction_of_cluster", "mean_orientation_score"]
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=keys)
+        writer.writeheader()
+        writer.writerows(grouped)
+    _write_markdown_table(md_path, keys, grouped)
+    heatmap = _cluster_orientation_heatmap(grouped, cluster_ids)
+    save_png(output_dir / "cluster_vs_orientation_heatmap.png", heatmap)
+    save_png(png_dir / "cluster_vs_orientation_heatmap.png", heatmap)
+    return {"csv": str(csv_path), "md": str(md_path), "heatmap_png": str(output_dir / "cluster_vs_orientation_heatmap.png")}
+
+
+def _orientation_extent(orientation: OrientationResult, label_shape: tuple[int, int]) -> tuple[int, int, int, int]:
+    if orientation.roi is None:
+        return 0, label_shape[0], 0, label_shape[1]
+    y0, y1, x0, x1 = [int(v) for v in orientation.roi]
+    return max(0, y0), min(label_shape[0], y1), max(0, x0), min(label_shape[1], x1)
+
+
+def _group_cluster_orientation_rows(rows: list[dict[str, float | int]]) -> list[dict[str, float | int]]:
+    accum: dict[tuple[int, int], dict[str, float | int]] = {}
+    cluster_totals: dict[int, int] = {}
+    for row in rows:
+        cluster = int(row["cluster"])
+        orientation_id = int(row["orientation_index"])
+        count = int(row["pixel_count"])
+        cluster_totals[cluster] = cluster_totals.get(cluster, 0) + count
+        key = (cluster, orientation_id)
+        item = accum.setdefault(
+            key,
+            {
+                "cluster": cluster,
+                "orientation_index": orientation_id,
+                "pixel_count": 0,
+                "score_weighted_sum": 0.0,
+            },
+        )
+        item["pixel_count"] = int(item["pixel_count"]) + count
+        item["score_weighted_sum"] = float(item["score_weighted_sum"]) + float(row["orientation_score"]) * count
+    grouped = []
+    for (cluster, orientation_id), item in sorted(accum.items()):
+        count = int(item["pixel_count"])
+        grouped.append(
+            {
+                "cluster": cluster,
+                "orientation_index": orientation_id,
+                "pixel_count": count,
+                "fraction_of_cluster": float(count / max(cluster_totals.get(cluster, 0), 1)),
+                "mean_orientation_score": float(item["score_weighted_sum"]) / max(count, 1),
+            }
+        )
+    return grouped
+
+
+def _write_markdown_table(path: Path, keys: list[str], rows: list[dict[str, float | int]]) -> None:
+    lines = ["| " + " | ".join(keys) + " |", "| " + " | ".join(["---"] * len(keys)) + " |"]
+    for row in rows:
+        lines.append("| " + " | ".join(_format_value(row.get(key, "")) for key in keys) + " |")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _cluster_orientation_heatmap(rows: list[dict[str, float | int]], cluster_ids: list[int]) -> np.ndarray:
+    orientation_ids = sorted({int(row["orientation_index"]) for row in rows})
+    if not orientation_ids:
+        return np.zeros((1, 1), dtype=np.float32)
+    cluster_to_row = {cluster_id: idx for idx, cluster_id in enumerate(cluster_ids)}
+    orientation_to_col = {orientation_id: idx for idx, orientation_id in enumerate(orientation_ids)}
+    heatmap = np.zeros((len(cluster_ids), len(orientation_ids)), dtype=np.float32)
+    for row in rows:
+        heatmap[cluster_to_row[int(row["cluster"])], orientation_to_col[int(row["orientation_index"])]] = float(row["fraction_of_cluster"])
+    return heatmap
 
 
 # ---------------------------------------------------------------------------

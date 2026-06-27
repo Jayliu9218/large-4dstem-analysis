@@ -236,6 +236,11 @@ def run_workflow(
             "mean_dp_with_center_marker": "mean_dp_with_center_marker.png",
             "orientation_score_masked": "orientation_score_masked.png",
             "k_sweep_metrics": "k_sweep_metrics.png",
+            "cluster_cleaned_labels": "cluster_cleaned_labels.png",
+            "cluster_vs_orientation_heatmap": "cluster_vs_orientation_heatmap.png",
+            "ring_2_over_ring_1": "ring_2_over_ring_1.png",
+            "ring_3_over_ring_1": "ring_3_over_ring_1.png",
+            "ring_3_over_ring_2": "ring_3_over_ring_2.png",
         }.items():
             path = png_dir / filename
             if path.exists():
@@ -278,6 +283,9 @@ def run_workflow(
         phase.labels if phase else _np.zeros(dataset.navigation_shape if dataset else (1, 1), dtype=_np.int16),
     )
     summary["outputs"]["report"] = str(report_path)
+    html_report_path = report_path.with_suffix(".html")
+    if html_report_path.exists():
+        summary["outputs"]["report_html"] = str(html_report_path)
     summary_path = save_summary(output_dir, summary)
 
     elapsed = time.perf_counter() - t0

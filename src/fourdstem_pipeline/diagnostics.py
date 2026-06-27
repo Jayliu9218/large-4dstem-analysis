@@ -16,12 +16,14 @@ import numpy as np
 
 from .dataset import DatasetHandle
 from .diagnostics_cluster import (
+    cluster_orientation_table,
     cluster_mean_diffraction,
     cluster_radial_profiles,
     cluster_virtual_statistics,
     interleave_mean_std,
     k_sweep,
     normalisation_comparison,
+    ring_ratio_maps,
     stats_bar_values,
     write_cluster_summary,
 )
@@ -86,6 +88,8 @@ def run_stage1_diagnostics(
     write_cluster_summary(cluster_dir, stats_rows)
     save_bar_png(png_dir / "cluster_virtual_image_statistics.png", stats_bar_values(stats_rows))
     save_bar_png(cluster_dir / "cluster_virtual_image_statistics.png", stats_bar_values(stats_rows))
+    ring_ratio_outputs = ring_ratio_maps(virtual, cluster_dir, png_dir)
+    cluster_orientation_outputs = cluster_orientation_table(labels, orientation, cluster_ids, cluster_dir, png_dir)
 
     # --- Normalisation comparison & K-sweep --------------------------------
     norm_outputs = normalisation_comparison(fingerprints.profiles, len(cluster_ids), class_dir, png_dir)
@@ -93,7 +97,7 @@ def run_stage1_diagnostics(
 
     # --- Spatial diagnostics -----------------------------------------------
     beam_outputs = beam_diagnostics(virtual, png_dir, output_dir / "00_preprocess")
-    component_outputs = connected_component_diagnostics(labels, virtual.images, cluster_ids, cluster_dir, png_dir)
+    component_outputs = connected_component_diagnostics(labels, virtual.images, cluster_ids, cluster_dir, png_dir, class_dir)
     orientation_outputs = orientation_reliability(orientation, confidence_threshold, png_dir, orientation_dir)
     roi_outputs = roi_candidates(labels, virtual.images, orientation, cluster_ids, roi_dir, png_dir)
 
@@ -102,6 +106,8 @@ def run_stage1_diagnostics(
         "roi_candidates": str(roi_dir),
         "cluster_summary_csv": str(cluster_dir / "cluster_summary.csv"),
         "cluster_summary_md": str(cluster_dir / "cluster_summary.md"),
+        "ring_ratio_maps": ring_ratio_outputs,
+        "cluster_vs_orientation": cluster_orientation_outputs,
         "normalization_comparison": norm_outputs,
         "k_sweep": k_sweep_outputs,
         "beam": beam_outputs,
