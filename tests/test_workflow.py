@@ -137,10 +137,12 @@ class WorkflowTests(unittest.TestCase):
         result = run_workflow(config)
         self.assertEqual(result.dataset.navigation_shape, (16, 16))
         self.assertTrue((self.output_dir / "workflow_summary.json").exists())
-        self.assertTrue((self.output_dir / "virtual" / "virtual_bf.npy").exists())
-        self.assertTrue((self.output_dir / "fingerprints" / "radial_fingerprints.npy").exists())
-        self.assertTrue((self.output_dir / "phase_screening" / "phase_labels.npy").exists())
-        self.assertTrue((self.output_dir / "orientation" / "orientation_index.npy").exists())
+        self.assertTrue((self.output_dir / "01_virtual_images" / "virtual_bf.npy").exists())
+        self.assertTrue((self.output_dir / "02_fingerprints" / "radial_fingerprints.npy").exists())
+        self.assertTrue((self.output_dir / "03_diffraction_classes" / "diffraction_class_labels.npy").exists())
+        self.assertTrue((self.output_dir / "04_orientation_preview" / "orientation_index.npy").exists())
+        self.assertTrue((self.output_dir / "05_cluster_diagnostics" / "cluster_summary.csv").exists())
+        self.assertTrue((self.output_dir / "06_roi_candidates" / "roi_candidates.yaml").exists())
 
     def test_run_workflow_resolves_directory_input(self):
         data_dir = self.output_dir / "data"

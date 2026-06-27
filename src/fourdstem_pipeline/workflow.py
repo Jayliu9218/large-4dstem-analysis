@@ -6,6 +6,7 @@ from typing import Any
 
 from .config import load_workflow_config
 from .dataset import DatasetHandle
+from .diagnostics import run_stage1_diagnostics
 from .export import save_annotated_label_png, save_label_png, save_png, save_profile_png, save_report, save_summary
 from .fingerprints import FingerprintResult, compute_radial_fingerprints
 from .loaders import load_dataset
@@ -25,6 +26,7 @@ class WorkflowResult:
     phase_screening: PhaseScreeningResult
     orientation: OrientationResult
     roi_bragg: dict[str, Any] | None
+    diagnostics: dict[str, Any]
     summary_path: Path
     report_path: Path
 
@@ -57,13 +59,21 @@ def run_workflow(config: str | Path | dict[str, Any] = "configs/default_workflow
         cfg.get("virtual_images", {}).get("masks", {}),
         center=geometry.get("center"),
     )
-    virtual = compute_virtual_images(dataset, masks, output_dir=output_dir / "virtual", block_shape=block_shape)
+    preprocess_dir = output_dir / "00_preprocess"
+    virtual_dir = output_dir / "01_virtual_images"
+    fingerprints_dir = output_dir / "02_fingerprints"
+    classes_dir = output_dir / "03_diffraction_classes"
+    orientation_dir = output_dir / "04_orientation_preview"
+    png_dir = output_dir / "png"
+    preprocess_dir.mkdir(parents=True, exist_ok=True)
+
+    virtual = compute_virtual_images(dataset, masks, output_dir=virtual_dir, block_shape=block_shape)
 
     fingerprints = compute_radial_fingerprints(
         dataset,
         geometry,
         int(geometry.get("radial_bins", 48)),
-        output_dir=output_dir / "fingerprints",
+        output_dir=fingerprints_dir,
         block_shape=block_shape,
     )
 
@@ -74,7 +84,7 @@ def run_workflow(config: str | Path | dict[str, Any] = "configs/default_workflow
         candidate_phases=phase_cfg.get("candidate_phases"),
         n_components=int(phase_cfg.get("n_components", 3)),
         n_clusters=int(phase_cfg.get("n_clusters", phase_cfg.get("n_components", 3))),
-        output_dir=output_dir / "phase_screening",
+        output_dir=classes_dir,
     )
 
     orientation_cfg = cfg.get("orientation", {})
@@ -84,7 +94,7 @@ def run_workflow(config: str | Path | dict[str, Any] = "configs/default_workflow
         binning=orientation_cfg.get("preview_binning", (2, 2)),
         roi=orientation_cfg.get("roi"),
         confidence_threshold=float(orientation_cfg.get("confidence_threshold", 0.05)),
-        output_dir=output_dir / "orientation",
+        output_dir=orientation_dir,
         block_shape=block_shape,
     )
 
@@ -93,7 +103,29 @@ def run_workflow(config: str | Path | dict[str, Any] = "configs/default_workflow
     if bool(roi_cfg.get("enabled", False)):
         roi_bragg = _run_roi_bragg(data_cfg, roi_cfg, output_dir / "roi_bragg")
 
-    png_outputs = _save_png_outputs(output_dir / "png", virtual, fingerprints, phase, orientation)
+    png_outputs = _save_png_outputs(png_dir, virtual, fingerprints, phase, orientation)
+    diagnostics = run_stage1_diagnostics(
+        dataset,
+        fingerprints,
+        phase,
+        virtual,
+        orientation,
+        output_dir=output_dir,
+        png_dir=png_dir,
+        block_shape=block_shape,
+        confidence_threshold=float(orientation_cfg.get("confidence_threshold", 0.05)),
+    )
+    for key, filename in {
+        "cluster_mean_radial_profiles": "cluster_mean_radial_profiles.png",
+        "cluster_virtual_image_statistics": "cluster_virtual_image_statistics.png",
+        "roi_candidates_overlay": "roi_candidates_overlay.png",
+        "mean_dp_with_center_marker": "mean_dp_with_center_marker.png",
+        "orientation_score_masked": "orientation_score_masked.png",
+        "k_sweep_metrics": "k_sweep_metrics.png",
+    }.items():
+        path = png_dir / filename
+        if path.exists():
+            png_outputs[key] = path
 
     summary = {
         "project": project_cfg,
@@ -103,15 +135,18 @@ def run_workflow(config: str | Path | dict[str, Any] = "configs/default_workflow
         "outputs": {
             "virtual": str(virtual.output_dir),
             "fingerprints": str(fingerprints.output_dir),
-            "phase_screening": str(phase.output_dir),
+            "diffraction_classes": str(phase.output_dir),
             "orientation": str(orientation.output_dir),
+            "cluster_diagnostics": diagnostics.get("cluster_diagnostics"),
+            "roi_candidates": diagnostics.get("roi_candidates"),
             "roi_bragg": roi_bragg,
             "png": {name: str(path) for name, path in png_outputs.items()},
+            "diagnostics": diagnostics,
         },
         "shapes": {
             "virtual_images": {name: image.shape for name, image in virtual.images.items()},
             "radial_fingerprints": fingerprints.profiles.shape,
-            "phase_labels": phase.labels.shape,
+            "diffraction_class_labels": phase.labels.shape,
             "orientation_index": orientation.orientation_index.shape,
         },
     }
@@ -126,6 +161,7 @@ def run_workflow(config: str | Path | dict[str, Any] = "configs/default_workflow
         phase_screening=phase,
         orientation=orientation,
         roi_bragg=roi_bragg,
+        diagnostics=diagnostics,
         summary_path=summary_path,
         report_path=report_path,
     )
@@ -185,9 +221,13 @@ def _save_png_outputs(
         fingerprints.radii,
         fingerprints.profiles,
     )
-    paths["phase_labels"] = save_label_png(output_dir / "phase_labels.png", phase.labels)
-    paths["phase_labels_annotated"] = save_annotated_label_png(output_dir / "phase_labels_annotated.png", phase.labels)
-    paths["phase_low_confidence"] = save_png(output_dir / "phase_low_confidence_mask.png", phase.low_confidence_mask)
+    paths["diffraction_class_labels"] = save_label_png(output_dir / "diffraction_class_labels.png", phase.labels)
+    paths["diffraction_class_labels_annotated"] = save_annotated_label_png(
+        output_dir / "diffraction_class_labels_annotated.png",
+        phase.labels,
+        title="Diffraction-class map from radial fingerprints",
+    )
+    paths["diffraction_class_low_confidence"] = save_png(output_dir / "diffraction_class_low_confidence_mask.png", phase.low_confidence_mask)
     for name, score in phase.candidate_scores.items():
         paths[f"candidate_score_{name}"] = save_png(output_dir / f"candidate_score_{name}.png", score)
     paths["orientation_index"] = save_label_png(output_dir / "orientation_index.png", orientation.orientation_index)

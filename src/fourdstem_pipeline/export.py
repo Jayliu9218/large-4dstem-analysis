@@ -99,6 +99,71 @@ def save_profile_png(path: str | Path, radii: np.ndarray, profiles: np.ndarray, 
     return save_png(path, canvas)
 
 
+def save_lines_png(
+    path: str | Path,
+    x: np.ndarray,
+    ys: np.ndarray,
+    *,
+    colors: list[tuple[int, int, int]] | None = None,
+    size: tuple[int, int] = (720, 420),
+) -> Path:
+    width, height = size
+    canvas = np.full((height, width, 3), 255, dtype=np.uint8)
+    margin_l, margin_r, margin_t, margin_b = 58, 22, 24, 46
+    x0, x1 = margin_l, width - margin_r - 1
+    y0, y1 = margin_t, height - margin_b - 1
+    canvas[y0:y1 + 1, x0] = 30
+    canvas[y1, x0:x1 + 1] = 30
+    for frac in np.linspace(0.25, 0.75, 3):
+        y_grid = int(y1 - frac * (y1 - y0))
+        canvas[y_grid, x0:x1 + 1] = 225
+
+    arr = np.asarray(ys, dtype=np.float32)
+    if arr.ndim == 1:
+        arr = arr[None, :]
+    x_values = np.asarray(x, dtype=np.float32)
+    if x_values.size != arr.shape[1]:
+        x_values = np.arange(arr.shape[1], dtype=np.float32)
+    px = _normalize_to_span(x_values, x0, x1).astype(int)
+    finite = arr[np.isfinite(arr)]
+    ymin = float(np.min(finite)) if finite.size else 0.0
+    ymax = float(np.max(finite)) if finite.size else 1.0
+    if ymax <= ymin:
+        ymax = ymin + 1.0
+    palette = colors or [tuple(map(int, color)) for color in _label_palette()]
+    for idx, series in enumerate(arr):
+        py = (y1 - (series - ymin) / (ymax - ymin) * (y1 - y0)).astype(int)
+        _draw_polyline(canvas, np.column_stack([px, py]), color=palette[idx % len(palette)])
+    return save_png(path, canvas)
+
+
+def save_bar_png(path: str | Path, values: np.ndarray, *, size: tuple[int, int] = (720, 420)) -> Path:
+    arr = np.asarray(values, dtype=np.float32)
+    if arr.ndim == 1:
+        arr = arr[:, None]
+    width, height = size
+    canvas = np.full((height, width, 3), 255, dtype=np.uint8)
+    margin_l, margin_r, margin_t, margin_b = 58, 22, 24, 46
+    plot_w = width - margin_l - margin_r
+    plot_h = height - margin_t - margin_b
+    vmax = max(float(np.nanmax(np.abs(arr))), 1e-12)
+    groups, bars = arr.shape
+    slot = max(1, plot_w // max(groups, 1))
+    bar_w = max(1, slot // max(bars + 1, 2))
+    palette = _label_palette()
+    baseline = height - margin_b - 1
+    canvas[margin_t:baseline + 1, margin_l] = 30
+    canvas[baseline, margin_l:width - margin_r] = 30
+    for group in range(groups):
+        for bar in range(bars):
+            value = max(float(arr[group, bar]), 0.0)
+            h = int(value / vmax * plot_h)
+            x0 = margin_l + group * slot + bar * bar_w + 2
+            x1 = min(x0 + bar_w, width - margin_r)
+            canvas[baseline - h:baseline, x0:x1] = palette[bar % len(palette)]
+    return save_png(path, canvas)
+
+
 def _label_palette() -> np.ndarray:
     return np.asarray(
         [
@@ -187,7 +252,7 @@ def _render_report(summary: dict[str, Any], phase_labels: np.ndarray, *, base_di
     png = outputs.get("png", {}) if isinstance(outputs.get("png"), dict) else {}
     shapes = summary.get("shapes", {})
     preprocess = summary.get("preprocess", "see workflow_summary.json")
-    title = str(project.get("name", "4D-STEM Screening Report"))
+    title = str(project.get("name", "4D-STEM Diffraction-Class Screening Report"))
 
     lines = [
         f"# {title}",
@@ -205,10 +270,20 @@ def _render_report(summary: dict[str, Any], phase_labels: np.ndarray, *, base_di
         f"- q-crop/q-bin/r-bin: `{preprocess}`",
         f"- Virtual image shapes: `{shapes.get('virtual_images', 'unknown')}`",
         f"- Radial fingerprints: `{shapes.get('radial_fingerprints', 'unknown')}`",
-        f"- Phase labels: `{shapes.get('phase_labels', 'unknown')}`",
+        f"- Diffraction-class labels: `{shapes.get('diffraction_class_labels', shapes.get('phase_labels', 'unknown'))}`",
         f"- Orientation preview: `{shapes.get('orientation_index', 'unknown')}`",
         "",
-        "## Phase Clusters",
+        "## Interpretation Level",
+        "",
+        "Level A: Diffraction class. Unsupervised radial-fingerprint class only. Not a crystallographic phase assignment.",
+        "",
+        "Level B: Phase candidate. Cluster average DP / radial peaks are consistent with a candidate phase. Requires indexing validation.",
+        "",
+        "Level C: Confirmed phase. Validated by py4DSTEM / pyxem template matching or Bragg indexing using candidate CIFs.",
+        "",
+        "Current Stage 1 result should be treated as Level A unless later indexing validation is added.",
+        "",
+        "## Unsupervised Diffraction Classes",
         "",
         "| Cluster | Pixels | Fraction |",
         "| --- | ---: | ---: |",
@@ -221,8 +296,11 @@ def _render_report(summary: dict[str, Any], phase_labels: np.ndarray, *, base_di
 
     lines.extend(["", "## Key PNG Outputs", ""])
     for key in [
-        "phase_labels_annotated",
-        "phase_labels",
+        "diffraction_class_labels_annotated",
+        "diffraction_class_labels",
+        "cluster_mean_radial_profiles",
+        "cluster_virtual_image_statistics",
+        "roi_candidates_overlay",
         "virtual_bf",
         "virtual_adf",
         "virtual_haadf",
@@ -248,11 +326,19 @@ def _render_report(summary: dict[str, Any], phase_labels: np.ndarray, *, base_di
             "",
             f"- Virtual images: `{outputs.get('virtual', 'not generated')}`",
             f"- Fingerprints: `{outputs.get('fingerprints', 'not generated')}`",
-            f"- Phase screening: `{outputs.get('phase_screening', 'not generated')}`",
+            f"- Diffraction classes: `{outputs.get('diffraction_classes', outputs.get('phase_screening', 'not generated'))}`",
+            f"- Cluster diagnostics: `{outputs.get('cluster_diagnostics', 'not generated')}`",
+            f"- ROI candidates: `{outputs.get('roi_candidates', 'not generated')}`",
             f"- Orientation: `{outputs.get('orientation', 'not generated')}`",
             f"- PNG previews: `{Path(next(iter(png.values()))).parent.as_posix() if png else 'not generated'}`",
             "",
-            "Notes: phase labels are unsupervised cluster IDs from radial fingerprints. They are phase-like screening labels, not crystallographic phase assignments by themselves.",
+            "## Interpretation Notes",
+            "",
+            "- Phase-like screening labels are unsupervised diffraction classes from radial fingerprints, not final crystallographic phase maps.",
+            "- If clusters strongly follow HAADF / ADF intensity, they may reflect thickness, Z-contrast, or mass-thickness effects.",
+            "- If clusters strongly follow COM-x / COM-y gradients, they may reflect bend, diffraction shift, or beam-center drift.",
+            "- If clusters mainly differ in ring ratios and radial peak positions, they are more plausible phase-like diffraction differences, but still require indexing validation.",
+            "- Final phase assignment must be validated by py4DSTEM / pyxem template matching, Bragg indexing, and candidate CIF checks.",
             "",
         ]
     )
