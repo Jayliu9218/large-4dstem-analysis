@@ -39,4 +39,10 @@ def parse_roi(roi: tuple[int, int, int, int] | list[int] | None, shape: tuple[in
     y1 = max(y0, min(y1, shape[0]))
     x0 = max(0, min(x0, shape[1]))
     x1 = max(x0, min(x1, shape[1]))
+    if y1 <= y0 or x1 <= x0:
+        raise ValueError(
+            f"ROI {[int(v) for v in roi]} clamped to shape {shape} results in "
+            f"zero-area slice: y=({y0},{y1}), x=({x0},{x1}). "
+            f"Adjust the ROI so that y1 > y0 and x1 > x0 after clamping."
+        )
     return slice(y0, y1), slice(x0, x1)

@@ -17,6 +17,7 @@ from fourdstem_pipeline import (
     compute_virtual_images,
     load_dataset,
     run_orientation_preview,
+    run_stage1_diagnostics,
     run_workflow,
     screen_phases,
 )
@@ -187,6 +188,184 @@ class WorkflowTests(unittest.TestCase):
         summary = json.loads((self.output_dir / "run" / "workflow_summary.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["data_config"]["backend"], "hyperspy_pyxem")
         self.assertEqual(summary["dataset"]["source_backend"], "hyperspy_pyxem")
+
+
+    def test_parse_roi_rejects_zero_area(self):
+        """parse_roi raises ValueError when ROI has zero height or width."""
+        from fourdstem_pipeline.array_utils import parse_roi
+
+        # Direct zero area (y1 == y0)
+        with self.assertRaises(ValueError):
+            parse_roi([64, 64, 192, 256], shape=(512, 512))
+
+        # Zero width (x1 == x0)
+        with self.assertRaises(ValueError):
+            parse_roi([64, 128, 192, 192], shape=(512, 512))
+
+        # Both zero
+        with self.assertRaises(ValueError):
+            parse_roi([64, 64, 192, 192], shape=(512, 512))
+
+        # Clamped to zero (all values beyond shape)
+        with self.assertRaises(ValueError):
+            parse_roi([600, 700, 600, 700], shape=(512, 512))
+
+        # Valid ROI should not raise
+        y_s, x_s = parse_roi([64, 128, 192, 256], shape=(512, 512))
+        self.assertEqual(y_s, slice(64, 128))
+        self.assertEqual(x_s, slice(192, 256))
+
+    def test_run_workflow_skips_zero_area_orientation_roi(self):
+        """Workflow skips orientation with info flag when ROI has zero area."""
+        config = {
+            "project": {"name": "test_zero_roi", "output_dir": str(self.output_dir)},
+            "data": {"path": "synthetic://demo", "lazy": True, "chunks": {"navigation": [8, 8], "signal": [64, 64]}},
+            "preprocess": {"q_crop": None, "q_bin": 1, "r_bin": 1},
+            "geometry": {"center": None, "radial_bins": 24},
+            "virtual_images": {"masks": {"bf": {"inner_radius": 0, "outer_radius": 8}}},
+            "phase_screening": {"method": "pca_nmf_cluster", "n_components": 2, "n_clusters": 2, "candidate_phases": []},
+            "orientation": {"preview_binning": [2, 2], "roi": [64, 64, 192, 192], "confidence_threshold": 0.0},
+            "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
+        }
+        result = run_workflow(config)
+        # Orientation should be None
+        self.assertIsNone(result.orientation)
+        # Workflow should still complete with diagnostics
+        self.assertTrue((self.output_dir / "workflow_summary.json").exists())
+        self.assertTrue((self.output_dir / "report.md").exists())
+        summary = json.loads((self.output_dir / "workflow_summary.json").read_text(encoding="utf-8"))
+        # QC should include the ORIENTATION_ROI_INVALID info flag
+        qc = summary.get("qc", {})
+        flags = qc.get("flags", [])
+        self.assertTrue(
+            any(f.get("code") == "ORIENTATION_ROI_INVALID" for f in flags),
+            f"Expected ORIENTATION_ROI_INVALID flag, got: {[f.get('code') for f in flags]}",
+        )
+
+    def test_diagnostics_resilient_to_missing_orientation(self):
+        """run_stage1_diagnostics preserves partial results when orientation is None."""
+        from fourdstem_pipeline.orientation import OrientationResult
+        import numpy as np
+
+        dataset = load_dataset("synthetic://demo")
+        fingerprints = compute_radial_fingerprints(dataset, {"center": None}, 8, output_dir=self.output_dir)
+        phase = screen_phases(fingerprints, n_components=2, n_clusters=2, output_dir=self.output_dir / "classes")
+        masks = build_annular_masks(
+            dataset.signal_shape,
+            {"bf": {"inner_radius": 0, "outer_radius": 4}, "adf": {"inner_radius": 4, "outer_radius": 8}},
+        )
+        virtual = compute_virtual_images(dataset, masks, output_dir=self.output_dir)
+
+        # With valid orientation — all outputs present
+        orientation = run_orientation_preview(
+            dataset, binning=(2, 2), roi=(4, 12, 4, 12),
+            confidence_threshold=0.0, output_dir=self.output_dir / "orient",
+        )
+        result = run_stage1_diagnostics(
+            dataset, fingerprints, phase, virtual, orientation,
+            output_dir=self.output_dir / "diag",
+            png_dir=self.output_dir / "diag_png",
+            block_shape=(8, 8),
+            confidence_threshold=0.0,
+        )
+        self.assertIn("cluster_diagnostics", result)
+        self.assertIn("cluster_summary_csv", result)
+        self.assertIn("beam", result)
+        self.assertIn("connected_components", result)
+        self.assertIn("orientation_reliability", result)
+        self.assertIn("roi_outputs", result)
+        self.assertIn("cluster_vs_orientation", result)
+        self.assertNotIn("_errors", result)
+
+        # With orientation=None — core outputs present, orientation-dep ones empty
+        result_none = run_stage1_diagnostics(
+            dataset, fingerprints, phase, virtual, None,
+            output_dir=self.output_dir / "diag_none",
+            png_dir=self.output_dir / "diag_none_png",
+            block_shape=(8, 8),
+            confidence_threshold=0.0,
+        )
+        self.assertIn("cluster_diagnostics", result_none)
+        self.assertIn("beam", result_none)
+        self.assertEqual(result_none.get("orientation_reliability"), {})
+        self.assertEqual(result_none.get("roi_outputs"), {})
+        self.assertEqual(result_none.get("cluster_vs_orientation"), {})
+
+    def test_qc_summary_and_report_use_ascii_labels(self):
+        """QC summary and report Markdown contain only ASCII labels, no emoji."""
+        from fourdstem_pipeline.qc import QCResult, QCFlag, save_qc_summary
+
+        for status, expected_label in [
+            ("PASS", "[PASS]"),
+            ("PASS_WITH_WARNINGS", "[WARN]"),
+            ("FAIL", "[FAIL]"),
+        ]:
+            result = QCResult(
+                stage1_status=status,
+                n_warnings=1 if status != "PASS" else 0,
+                n_critical=1 if status == "FAIL" else 0,
+                flags=[QCFlag(severity="info", code="TEST", message="Test flag.")],
+            )
+            _, md_path = save_qc_summary(self.output_dir / f"qc_{status}", result)
+            md_text = md_path.read_text(encoding="utf-8")
+            self.assertIn(expected_label, md_text)
+            for emoji_char in ["✅", "⚠", "❌", "❓"]:
+                self.assertNotIn(emoji_char, md_text,
+                                 f"Emoji {repr(emoji_char)} found in QC markdown for {status}")
+
+        # Verify the workflow report Markdown also avoids emoji
+        config = {
+            "project": {"name": "test_ascii", "output_dir": str(self.output_dir / "run_ascii")},
+            "data": {"path": "synthetic://demo", "lazy": True, "chunks": {"navigation": [8, 8], "signal": [64, 64]}},
+            "preprocess": {"q_crop": None, "q_bin": 1, "r_bin": 1},
+            "geometry": {"center": None, "radial_bins": 24},
+            "virtual_images": {"masks": {"bf": {"inner_radius": 0, "outer_radius": 8}}},
+            "phase_screening": {"method": "pca_nmf_cluster", "n_components": 2, "n_clusters": 2, "candidate_phases": []},
+            "orientation": {"preview_binning": [2, 2], "roi": [4, 12, 4, 12], "confidence_threshold": 0.0},
+            "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
+        }
+        wf_result = run_workflow(config)
+        report_text = wf_result.report_path.read_text(encoding="utf-8")
+        for emoji_char in ["✅", "⚠", "❌", "❓"]:
+            self.assertNotIn(emoji_char, report_text,
+                             f"Emoji {repr(emoji_char)} found in report Markdown")
+
+    def test_no_legacy_diffraction_class_terminology(self):
+        """Generated Markdown uses 'fingerprint-class' not 'diffraction-class'."""
+        from fourdstem_pipeline.qc import QCResult, QCFlag, save_qc_summary
+
+        # Check QC markdown
+        result = QCResult(
+            stage1_status="PASS",
+            n_warnings=0,
+            n_critical=0,
+            flags=[QCFlag(
+                severity="warning", code="BEAM_CENTER_OFFSET",
+                message="Radial fingerprints and fingerprint-class labels may be biased.",
+                evidence={},
+            )],
+        )
+        _, md_path = save_qc_summary(self.output_dir / "qc_term", result)
+        md_text = md_path.read_text(encoding="utf-8")
+        self.assertNotIn("diffraction-class", md_text)
+
+        # Run a full workflow and check the report
+        config = {
+            "project": {"name": "test_term", "output_dir": str(self.output_dir / "run_term")},
+            "data": {"path": "synthetic://demo", "lazy": True, "chunks": {"navigation": [8, 8], "signal": [64, 64]}},
+            "preprocess": {"q_crop": None, "q_bin": 1, "r_bin": 1},
+            "geometry": {"center": None, "radial_bins": 24},
+            "virtual_images": {"masks": {"bf": {"inner_radius": 0, "outer_radius": 8}}},
+            "phase_screening": {"method": "pca_nmf_cluster", "n_components": 2, "n_clusters": 2, "candidate_phases": []},
+            "orientation": {"preview_binning": [2, 2], "roi": [4, 12, 4, 12], "confidence_threshold": 0.0},
+            "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
+        }
+        wf_result = run_workflow(config)
+        report_text = wf_result.report_path.read_text(encoding="utf-8")
+        self.assertNotIn("diffraction-class", report_text)
 
 
 if __name__ == "__main__":

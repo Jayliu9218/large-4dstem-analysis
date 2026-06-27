@@ -22,6 +22,82 @@ python -m unittest discover -s tests -v
 The default config runs fully on `synthetic://demo`. Point `data.path` at a real
 `.mib`, `.npy`, or `.npz` dataset when data are available.
 
+## Stage 1 Outputs
+
+A successful Stage 1 run produces the following key outputs in the configured
+`output_dir`:
+
+| Output | Path | Description |
+| --- | --- | --- |
+| Workflow summary | `workflow_summary.json` | Full pipeline metadata, shapes, and paths |
+| Stage 1 manifest | `stage1_summary.json` | Canonical Stage-1 to Stage-2 interface file |
+| QC summary | `qc_summary.json` / `qc_summary.md` | Quality-control flags and status |
+| Data contract | `data_contract.json` | Axis order, bbox convention, centre convention |
+| Preprocess info | `preprocess_info.json` | Crop/bin parameters and resulting shapes |
+| Provenance | `provenance.json` | Git commit, config hash, package versions, timestamps |
+| Virtual images | `virtual/virtual_images.npz` | BF, ADF, HAADF, ring images and COM maps |
+| Radial fingerprints | `fingerprints/radial_fingerprints.npy` | Per-pixel radial profiles |
+| Radial axis | `fingerprints/radial_axis.npy` | Radial bin centres (pixels) |
+| Fingerprint classes | `fingerprint_classes/fingerprint_class_labels.npy` | Unsupervised phase-candidate label map |
+| Orientation preview | `orientation/orientation_index.npy` | Binned orientation index map |
+| Cluster diagnostics | `05_cluster_diagnostics/` | Cluster mean DPs, radial profiles, statistics, ring ratios |
+| ROI candidates | `roi_candidates/roi_candidates.yaml` | Stage-2 ROI proposals with bboxes and rationale |
+| Report | `report.md` / `report.html` | Human-readable summary with inline images |
+| PNG previews | `png/` | Label maps, profiles, overlays for quick visual inspection |
+
+## Coordinate Conventions
+
+The pipeline follows a single unified data contract (`data_contract.json`):
+
+- **Axis order**: `nav_y, nav_x, q_y, q_x` (navigation rows, navigation columns,
+  diffraction rows, diffraction columns).
+- **BBox / ROI order**: `y0, y1, x0, x1` (row start, row end, column start,
+  column end). Python slice semantics: `y0` is inclusive, `y1` is exclusive.
+- **Centre order**: `y, x` (row first, column second). The geometric centre of a
+  detector of shape `(H, W)` is `((H-1)/2, (W-1)/2)`.
+
+All array indexing and ROI specifications throughout the pipeline use this
+convention. When configuring `orientation.roi` or `roi_bragg.roi`, ensure
+`y1 > y0` and `x1 > x0` — zero-area ROIs are rejected with a clear error.
+
+## Troubleshooting
+
+### Orientation ROI with zero area
+
+If the pipeline reports `ORIENTATION_ROI_INVALID` in `qc_summary.md`, the
+configured `orientation.roi` has zero or negative height/width. For example:
+
+```yaml
+orientation:
+  roi: [64, 64, 192, 192]   # ERROR: y1 == y0, zero height
+```
+
+The fix is to ensure `y1 > y0` and `x1 > x0`:
+
+```yaml
+orientation:
+  roi: [64, 128, 192, 256]  # Correct: 64 rows, 64 columns
+```
+
+### Orientation preview skipped
+
+Orientation preview can fail for several reasons:
+- Zero-area ROI (see above).
+- The configured ROI falls entirely outside the navigation shape after binning
+  and clamping.
+- Template matching failed because no candidate phases with valid templates
+  were provided.
+
+When orientation is skipped, orientation-dependent diagnostics (orientation
+reliability maps, ROI candidates based on orientation scores) are not
+generated, but all other diagnostics and the report are still produced.
+
+### Emoji display (mojibake) in generated reports
+
+The pipeline avoids Unicode emoji in generated Markdown and HTML. QC status is
+rendered as ASCII labels (`[PASS]`, `[WARN]`, `[FAIL]`, `[N/A]`) for maximum
+compatibility across platforms, terminals, and text editors.
+
 ## Framework
 
 - `src/fourdstem_pipeline/loaders.py`: load synthetic, NumPy, NPZ, or HyperSpy-backed data.

@@ -80,6 +80,7 @@ def run_qc_checks(
     *,
     confidence_threshold: float = 0.05,
     sample_mask: np.ndarray | None = None,
+    orientation_roi_invalid: bool = False,
 ) -> QCResult:
     """Run all Stage-1 QC checks and return an aggregated result.
 
@@ -151,6 +152,7 @@ def run_qc_checks(
     _check_saturation(virtual, flags)
 
     # --- 8. Orientation confidence -----------------------------------------
+    _check_orientation_roi(orientation, orientation_roi_invalid, flags)
     _check_orientation_confidence(orientation, confidence_threshold, flags)
 
     # --- 9. ROI candidates -------------------------------------------------
@@ -367,7 +369,7 @@ def _check_beam_center(virtual: VirtualImageResult | None, flags: list[QCFlag]) 
                     message=(
                         f"Estimated beam centre ({cy:.1f}, {cx:.1f}) is {offset:.1f} px "
                         f"from the geometric centre ({rc_y:.1f}, {rc_x:.1f}). "
-                        "Radial fingerprints and diffraction-class labels may be biased."
+                        "Radial fingerprints and fingerprint-class labels may be biased."
                     ),
                     evidence={
                         "estimated_center_yx": [round(cy, 3), round(cx, 3)],
@@ -433,6 +435,37 @@ def _check_orientation_confidence(
             )
     except Exception:
         pass
+
+
+def _check_orientation_roi(
+    orientation: OrientationResult | None,
+    orientation_roi_invalid: bool,
+    flags: list[QCFlag],
+) -> None:
+    if orientation_roi_invalid:
+        flags.append(
+            QCFlag(
+                severity="info",
+                code="ORIENTATION_ROI_INVALID",
+                message=(
+                    "Orientation preview was skipped because the configured ROI "
+                    "has zero area (y1 <= y0 or x1 <= x0). Adjust the roi in "
+                    "the config to a valid rectangular region."
+                ),
+            )
+        )
+    elif orientation is None:
+        flags.append(
+            QCFlag(
+                severity="warning",
+                code="ORIENTATION_MISSING",
+                message=(
+                    "Orientation preview was not computed. Orientation-dependent "
+                    "diagnostics (orientation reliability, ROI candidates) are "
+                    "unavailable."
+                ),
+            )
+        )
 
 
 def _check_roi_candidates(diagnostics: dict[str, Any] | None, flags: list[QCFlag]) -> None:
@@ -538,11 +571,11 @@ def _check_sample_mask(
 
 def _render_qc_markdown(result: QCResult) -> str:
     status = result.stage1_status
-    emoji = {"PASS": "✅", "PASS_WITH_WARNINGS": "⚠️", "FAIL": "❌"}.get(status, "❓")
+    label = {"PASS": "[PASS]", "PASS_WITH_WARNINGS": "[WARN]", "FAIL": "[FAIL]"}.get(status, "[N/A]")
     lines = [
         f"# Stage 1 QC Summary",
         "",
-        f"**Status: {emoji} {status}**",
+        f"**Status: {label}**",
         "",
         f"- Warnings: {result.n_warnings}",
         f"- Critical: {result.n_critical}",

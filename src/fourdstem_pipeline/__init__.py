@@ -11,6 +11,7 @@ from .phase import PhaseScreeningResult, screen_phases
 from .preprocess import PreprocessedArray, PreprocessSpec, apply_preprocess
 from .synthetic import make_synthetic_4dstem
 from .virtual import VirtualImageResult, compute_virtual_images
+from .diagnostics import run_stage1_diagnostics
 from .workflow import WorkflowResult, run_workflow
 
 __all__ = [
@@ -33,6 +34,7 @@ __all__ = [
     "make_synthetic_4dstem",
     "resolve_data_config",
     "run_orientation_preview",
+    "run_stage1_diagnostics",
     "run_workflow",
     "screen_phases",
     "validate_workflow_config",

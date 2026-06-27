@@ -45,7 +45,7 @@ def beam_diagnostics(
     if offset > 3:
         text += (
             "WARNING: Estimated beam center is offset from radial integration center. "
-            "Radial fingerprints and diffraction-class labels may be biased.\n"
+            "Radial fingerprints and fingerprint-class labels may be biased.\n"
         )
     (preprocess_dir / "beam_center_estimate.txt").write_text(text, encoding="utf-8")
     save_png(png_dir / "mean_dp_log.png", np.log1p(mean_dp))

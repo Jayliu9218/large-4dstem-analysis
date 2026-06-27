@@ -228,19 +228,36 @@ def run_workflow(
     # Stage 4: Orientation preview
     # ------------------------------------------------------------------
     orientation_cfg = cfg.get("orientation", {})
-    orientation = _run_stage(
-        "orientation preview",
-        lambda: run_orientation_preview(
-            dataset,
-            phase_candidates=orientation_cfg.get("phase_candidates"),
-            binning=orientation_cfg.get("preview_binning", (2, 2)),
-            roi=orientation_cfg.get("roi"),
-            confidence_threshold=float(orientation_cfg.get("confidence_threshold", 0.05)),
-            output_dir=orientation_dir,
-            block_shape=block_shape,
-        ),
-        errors=errors,
-    )
+    orientation_roi_invalid = False
+    roi_raw = orientation_cfg.get("roi")
+
+    if roi_raw is not None:
+        y0_raw, y1_raw, x0_raw, x1_raw = [int(v) for v in roi_raw]
+        # Pre-validate: reject ROI where end <= start before clamping
+        if y1_raw <= y0_raw or x1_raw <= x0_raw:
+            orientation_roi_invalid = True
+            log.warning(
+                "Orientation ROI %s has zero area (y1=%d <= y0=%d or x1=%d <= x0=%d) "
+                "-- skipping orientation preview.",
+                roi_raw, y1_raw, y0_raw, x1_raw, x0_raw,
+            )
+
+    if orientation_roi_invalid:
+        orientation = None
+    else:
+        orientation = _run_stage(
+            "orientation preview",
+            lambda: run_orientation_preview(
+                dataset,
+                phase_candidates=orientation_cfg.get("phase_candidates"),
+                binning=orientation_cfg.get("preview_binning", (2, 2)),
+                roi=roi_raw,
+                confidence_threshold=float(orientation_cfg.get("confidence_threshold", 0.05)),
+                output_dir=orientation_dir,
+                block_shape=block_shape,
+            ),
+            errors=errors,
+        )
 
     # ------------------------------------------------------------------
     # Stage 5: ROI Bragg (optional)
@@ -258,7 +275,7 @@ def run_workflow(
     # PNG exports
     # ------------------------------------------------------------------
     png_outputs: dict[str, Path] = {}
-    if virtual is not None and fingerprints is not None and phase is not None and orientation is not None:
+    if virtual is not None and fingerprints is not None and phase is not None:
         png_outputs = _save_png_outputs(png_dir, virtual, fingerprints, phase, orientation)
     else:
         log.warning("Skipping PNG exports because one or more upstream stages failed.")
@@ -267,7 +284,7 @@ def run_workflow(
     # Diagnostics
     # ------------------------------------------------------------------
     diagnostics: dict[str, Any] = {}
-    if virtual is not None and fingerprints is not None and phase is not None and orientation is not None:
+    if virtual is not None and fingerprints is not None and phase is not None:
         diagnostics = _run_stage(
             "stage-1 diagnostics",
             lambda: run_stage1_diagnostics(
@@ -301,7 +318,7 @@ def run_workflow(
             if path.exists():
                 png_outputs[key] = path
     else:
-        log.warning("Skipping diagnostics because one or more upstream stages failed.")
+        log.warning("Skipping diagnostics because virtual, fingerprints, or phase screening failed.")
 
     # Sample mask PNGs (may exist even when diagnostics are skipped)
     for key, filename in {
@@ -342,6 +359,7 @@ def run_workflow(
         errors=errors if errors else None,
         confidence_threshold=float(orientation_cfg.get("confidence_threshold", 0.05)),
         sample_mask=sample_mask,
+        orientation_roi_invalid=orientation_roi_invalid,
     )
     save_qc_summary(output_dir, qc_result)
 
@@ -611,7 +629,7 @@ def _save_png_outputs(
     virtual: VirtualImageResult,
     fingerprints: FingerprintResult,
     phase: PhaseScreeningResult,
-    orientation: OrientationResult,
+    orientation: OrientationResult | None,
 ) -> dict[str, Path]:
     paths: dict[str, Path] = {}
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -635,9 +653,10 @@ def _save_png_outputs(
     paths["fingerprint_class_low_confidence"] = save_png(output_dir / "fingerprint_class_low_confidence_mask.png", phase.low_confidence_mask)
     for name, score in phase.candidate_scores.items():
         paths[f"candidate_score_{name}"] = save_png(output_dir / f"candidate_score_{name}.png", score)
-    paths["orientation_index"] = save_label_png(output_dir / "orientation_index.png", orientation.orientation_index)
-    paths["orientation_score"] = save_png(output_dir / "orientation_score.png", orientation.score)
-    paths["orientation_low_confidence"] = save_png(output_dir / "orientation_low_confidence_mask.png", orientation.low_confidence_mask)
+    if orientation is not None:
+        paths["orientation_index"] = save_label_png(output_dir / "orientation_index.png", orientation.orientation_index)
+        paths["orientation_score"] = save_png(output_dir / "orientation_score.png", orientation.score)
+        paths["orientation_low_confidence"] = save_png(output_dir / "orientation_low_confidence_mask.png", orientation.low_confidence_mask)
     return paths
 
 
