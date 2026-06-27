@@ -3,13 +3,22 @@ project:
   output_dir: outputs
 
 data:
-  # Use "synthetic://demo" until a real file is available.
+  # Use "synthetic://demo" until a real .mib/.npy/.npz dataset is available.
   path: synthetic://demo
   lazy: true
   cache: outputs/cache
   chunks:
     navigation: [8, 8]
     signal: [64, 64]
+  # Real MIB example:
+  # path: D:/path/to/your/file.mib
+  # scan_shape: [512, 512]
+
+preprocess:
+  # Diffraction crop as [qy0, qy1, qx0, qx1]; null disables cropping.
+  q_crop: null
+  q_bin: 1
+  r_bin: 1
 
 geometry:
   center: null
@@ -35,3 +44,10 @@ orientation:
   preview_binning: [2, 2]
   roi: [4, 4, 12, 12]
   confidence_threshold: 0.05
+
+roi_bragg:
+  enabled: false
+  roi: [192, 320, 192, 320]
+  thin_r: 2
+  bin_q: 2
+  mem: MEMMAP
