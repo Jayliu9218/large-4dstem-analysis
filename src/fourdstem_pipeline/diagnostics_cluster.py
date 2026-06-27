@@ -16,7 +16,6 @@ from sklearn.metrics import calinski_harabasz_score, davies_bouldin_score, silho
 from .array_utils import as_numpy_block, iter_navigation_slices
 from .dataset import DatasetHandle
 from .export import save_bar_png, save_label_png, save_lines_png, save_png
-from .fingerprints import FingerprintResult
 from .orientation import OrientationResult
 from .virtual import VirtualImageResult
 
@@ -168,7 +167,6 @@ def ring_ratio_maps(
         ratio = virtual.images[numerator] / np.maximum(virtual.images[denominator], 1e-12)
         npy_path = output_dir / f"{key}.npy"
         np.save(npy_path, ratio.astype(np.float32))
-        save_png(output_dir / f"{key}.png", ratio)
         save_png(png_dir / f"{key}.png", ratio)
         outputs[key] = str(npy_path)
     return outputs
@@ -227,9 +225,8 @@ def cluster_orientation_table(
         writer.writerows(grouped)
     _write_markdown_table(md_path, keys, grouped)
     heatmap = _cluster_orientation_heatmap(grouped, cluster_ids)
-    save_png(output_dir / "cluster_vs_orientation_heatmap.png", heatmap)
-    save_png(png_dir / "cluster_vs_orientation_heatmap.png", heatmap)
-    return {"csv": str(csv_path), "md": str(md_path), "heatmap_png": str(output_dir / "cluster_vs_orientation_heatmap.png")}
+    heatmap_png = save_png(png_dir / "cluster_vs_orientation_heatmap.png", heatmap)
+    return {"csv": str(csv_path), "md": str(md_path), "heatmap_png": str(heatmap_png)}
 
 
 def _orientation_extent(orientation: OrientationResult, label_shape: tuple[int, int]) -> tuple[int, int, int, int]:

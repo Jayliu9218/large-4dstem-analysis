@@ -372,7 +372,6 @@ def _render_report(summary: dict[str, Any], phase_labels: np.ndarray, *, base_di
     lines.extend(["", "## Key PNG Outputs", ""])
     for key in [
         "fingerprint_class_labels_annotated",
-        "fingerprint_class_labels",
         "cluster_cleaned_labels",
         "cluster_mean_radial_profiles",
         "cluster_virtual_image_statistics",
@@ -388,7 +387,6 @@ def _render_report(summary: dict[str, Any], phase_labels: np.ndarray, *, base_di
         "virtual_haadf",
         "com_x",
         "com_y",
-        "mean_diffraction",
         "mean_radial_profile",
         "orientation_index",
         "orientation_score",

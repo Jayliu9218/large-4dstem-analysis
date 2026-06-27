@@ -6,7 +6,10 @@ from typing import Any
 import numpy as np
 
 from .dataset import DatasetHandle
+from .logging import get_logger
 from .synthetic import make_synthetic_4dstem
+
+log = get_logger(__name__)
 
 
 def load_dataset(
@@ -62,7 +65,13 @@ def load_dataset(
         )
 
     if suffix == ".npz":
-        archive = np.load(data_path, mmap_mode="r" if lazy else None)
+        if lazy:
+            log.info(
+                "NPZ lazy loading requested for %s, but NumPy cannot memory-map NPZ members; "
+                "loading the selected array eagerly.",
+                data_path,
+            )
+        archive = np.load(data_path)
         key = "data" if "data" in archive.files else archive.files[0]
         data = archive[key]
         return DatasetHandle(

@@ -85,10 +85,7 @@ def run_stage1_diagnostics(
         cluster_mean_dps = cluster_mean_diffraction(dataset, labels, cluster_ids, block_shape)
         np.save(cluster_dir / "cluster_mean_dps.npy", cluster_mean_dps)
         for idx, cluster_id in enumerate(cluster_ids):
-            save_png(png_dir / f"cluster_mean_dp_{cluster_id}.png", cluster_mean_dps[idx])
-            save_png(cluster_dir / f"cluster_mean_dp_{cluster_id}.png", cluster_mean_dps[idx])
             save_png(png_dir / f"cluster_mean_dp_log_{cluster_id}.png", np.log1p(cluster_mean_dps[idx]))
-            save_png(cluster_dir / f"cluster_mean_dp_log_{cluster_id}.png", np.log1p(cluster_mean_dps[idx]))
     except Exception as exc:
         log.error("Cluster mean diffraction patterns failed: %s", exc)
         diag_errors.append(f"cluster_mean_diffraction: {exc}")
@@ -100,10 +97,7 @@ def run_stage1_diagnostics(
         np.save(class_dir / "cluster_mean_radial_profiles.npy", radial_mean)
         np.save(cluster_dir / "cluster_radial_profile_std.npy", radial_std)
         save_lines_png(png_dir / "cluster_mean_radial_profiles.png", fingerprints.radii, radial_mean)
-        save_lines_png(cluster_dir / "cluster_mean_radial_profiles.png", fingerprints.radii, radial_mean)
         save_lines_png(png_dir / "cluster_radial_profile_mean_std.png", fingerprints.radii,
-                       interleave_mean_std(radial_mean, radial_std))
-        save_lines_png(cluster_dir / "cluster_radial_profile_mean_std.png", fingerprints.radii,
                        interleave_mean_std(radial_mean, radial_std))
     except Exception as exc:
         log.error("Cluster radial profiles failed: %s", exc)
@@ -115,7 +109,6 @@ def run_stage1_diagnostics(
         write_cluster_summary(cluster_dir, stats_rows)
         write_cluster_summary(class_dir, stats_rows)
         save_bar_png(png_dir / "cluster_virtual_image_statistics.png", stats_bar_values(stats_rows))
-        save_bar_png(cluster_dir / "cluster_virtual_image_statistics.png", stats_bar_values(stats_rows))
     except Exception as exc:
         log.error("Cluster virtual statistics failed: %s", exc)
         diag_errors.append(f"cluster_virtual_statistics: {exc}")

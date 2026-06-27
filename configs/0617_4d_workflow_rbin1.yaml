@@ -49,7 +49,7 @@ phase_screening:
 
 orientation:
   preview_binning: [4, 4]
-  roi: [128, 128, 384, 384]
+  roi: [128, 384, 128, 384]
   confidence_threshold: 0.05
 
 roi_bragg:

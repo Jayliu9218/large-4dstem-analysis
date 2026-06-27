@@ -99,18 +99,15 @@ def connected_component_diagnostics(
         writer.writeheader()
         writer.writerows(rows)
     np.save(output_dir / "cluster_cleaned_labels.npy", cleaned.astype(np.int16))
-    save_label_png(output_dir / "cluster_cleaned_labels.png", cleaned)
-    save_label_png(png_dir / "cluster_cleaned_labels.png", cleaned)
+    cleaned_png = save_label_png(png_dir / "cluster_cleaned_labels.png", cleaned)
     class_outputs: dict[str, str] = {}
     if class_dir is not None:
         class_dir.mkdir(parents=True, exist_ok=True)
         class_npy = class_dir / "fingerprint_class_labels_cleaned.npy"
-        class_png = class_dir / "fingerprint_class_labels_cleaned.png"
         np.save(class_npy, cleaned.astype(np.int16))
-        save_label_png(class_png, cleaned)
         class_outputs = {
             "fingerprint_class_labels_cleaned_npy": str(class_npy),
-            "fingerprint_class_labels_cleaned_png": str(class_png),
+            "fingerprint_class_labels_cleaned_png": str(cleaned_png),
         }
     save_bar_png(
         png_dir / "cluster_area_histogram.png",
@@ -121,7 +118,7 @@ def connected_component_diagnostics(
     return {
         "connected_components_csv": str(output_dir / "cluster_connected_components.csv"),
         "cleaned_labels_npy": str(output_dir / "cluster_cleaned_labels.npy"),
-        "cleaned_labels_png": str(output_dir / "cluster_cleaned_labels.png"),
+        "cleaned_labels_png": str(cleaned_png),
         **class_outputs,
     }
 
@@ -223,7 +220,6 @@ def roi_candidates(
         writer.writerows([{key: roi.get(key, "") for key in keys} for roi in rois])
     base = images.get("adf") if "adf" in images else next(iter(images.values()))
     save_png(png_dir / "roi_candidates_overlay.png", _roi_overlay(base, rois))
-    save_png(output_dir / "roi_candidates_overlay.png", _roi_overlay(base, rois))
     return {"yaml": str(yaml_path), "csv": str(csv_path)}
 
 

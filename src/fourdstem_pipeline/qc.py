@@ -18,9 +18,12 @@ import numpy as np
 
 from .dataset import DatasetHandle
 from .fingerprints import FingerprintResult
+from .logging import get_logger
 from .orientation import OrientationResult
 from .phase import PhaseScreeningResult
 from .virtual import VirtualImageResult
+
+log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -378,8 +381,8 @@ def _check_beam_center(virtual: VirtualImageResult | None, flags: list[QCFlag]) 
                     },
                 )
             )
-    except Exception:
-        pass  # best-effort; do not crash the QC pass
+    except Exception as exc:
+        log.warning("QC check BEAM_CENTER_OFFSET failed: %s", exc)
 
 
 def _check_saturation(virtual: VirtualImageResult | None, flags: list[QCFlag]) -> None:
@@ -402,8 +405,8 @@ def _check_saturation(virtual: VirtualImageResult | None, flags: list[QCFlag]) -
                     evidence={"saturation_fraction": round(sat_fraction, 5)},
                 )
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("QC check SATURATION_HIGH failed: %s", exc)
 
 
 def _check_orientation_confidence(
@@ -433,8 +436,8 @@ def _check_orientation_confidence(
                     },
                 )
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("QC check LOW_ORIENTATION_CONFIDENCE failed: %s", exc)
 
 
 def _check_orientation_roi(
@@ -514,8 +517,8 @@ def _check_roi_candidates(diagnostics: dict[str, Any] | None, flags: list[QCFlag
                         evidence={"n_rois": n_rois},
                     )
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("QC check ROI_CANDIDATES failed: %s", exc)
 
 
 def _check_sample_mask(
@@ -560,8 +563,8 @@ def _check_sample_mask(
                         },
                     )
                 )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("QC check SAMPLE_MASK failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------

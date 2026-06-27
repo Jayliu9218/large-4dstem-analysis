@@ -54,7 +54,7 @@ orientation:
   preview_binning: [4, 4]
   # ROI is expressed after preprocess.r_bin, so this is a central 64x64 area
   # in the 128x128 first-pass scan grid.
-  roi: [32, 32, 96, 96]
+  roi: [32, 96, 32, 96]
   confidence_threshold: 0.05
 
 roi_bragg:

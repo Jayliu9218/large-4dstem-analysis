@@ -429,9 +429,13 @@ def run_workflow(
         qc_result=qc_result,
     )
 
+    try:
+        default_nav = dataset.navigation_shape if dataset else (1, 1)
+    except (ValueError, AttributeError):
+        default_nav = (1, 1)
     report_path = save_report(
         output_dir, summary,
-        phase.labels if phase else _np.zeros(dataset.navigation_shape if dataset else (1, 1), dtype=_np.int16),
+        phase.labels if phase else _np.zeros(default_nav, dtype=_np.int16),
     )
     summary["outputs"]["report"] = str(report_path)
     html_report_path = report_path.with_suffix(".html")
@@ -637,14 +641,12 @@ def _save_png_outputs(
         paths[f"virtual_{name}"] = save_png(output_dir / f"virtual_{name}.png", image)
     paths["com_x"] = save_png(output_dir / "com_x.png", virtual.com_x)
     paths["com_y"] = save_png(output_dir / "com_y.png", virtual.com_y)
-    paths["mean_diffraction"] = save_png(output_dir / "mean_diffraction.png", virtual.mean_diffraction)
     paths["max_diffraction"] = save_png(output_dir / "max_diffraction.png", virtual.max_diffraction)
     paths["mean_radial_profile"] = save_profile_png(
         output_dir / "mean_radial_profile.png",
         fingerprints.radii,
         fingerprints.profiles,
     )
-    paths["fingerprint_class_labels"] = save_label_png(output_dir / "fingerprint_class_labels.png", phase.labels)
     paths["fingerprint_class_labels_annotated"] = save_annotated_label_png(
         output_dir / "fingerprint_class_labels_annotated.png",
         phase.labels,

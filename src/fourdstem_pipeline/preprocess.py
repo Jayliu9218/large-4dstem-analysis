@@ -7,6 +7,9 @@ import numpy as np
 
 from .array_utils import as_numpy_block
 from .dataset import DatasetHandle
+from .logging import get_logger
+
+log = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +86,34 @@ class PreprocessedArray:
             qx = qx1 - qx0
         r_bin = max(1, int(spec.r_bin))
         q_bin = max(1, int(spec.q_bin))
+        if ry % r_bin:
+            log.warning(
+                "Navigation y dimension %d is not divisible by r_bin=%d; %d row(s) will be dropped.",
+                ry,
+                r_bin,
+                ry % r_bin,
+            )
+        if rx % r_bin:
+            log.warning(
+                "Navigation x dimension %d is not divisible by r_bin=%d; %d column(s) will be dropped.",
+                rx,
+                r_bin,
+                rx % r_bin,
+            )
+        if qy % q_bin:
+            log.warning(
+                "Diffraction y dimension %d is not divisible by q_bin=%d; %d row(s) will be dropped.",
+                qy,
+                q_bin,
+                qy % q_bin,
+            )
+        if qx % q_bin:
+            log.warning(
+                "Diffraction x dimension %d is not divisible by q_bin=%d; %d column(s) will be dropped.",
+                qx,
+                q_bin,
+                qx % q_bin,
+            )
         return (ry // r_bin, rx // r_bin, qy // q_bin, qx // q_bin)
 
 

@@ -76,7 +76,7 @@ The fix is to ensure `y1 > y0` and `x1 > x0`:
 
 ```yaml
 orientation:
-  roi: [64, 128, 192, 256]  # Correct: 64 rows, 64 columns
+  roi: [64, 192, 64, 192]   # Correct: [y0, y1, x0, x1]
 ```
 
 ### Orientation preview skipped
