@@ -7,6 +7,9 @@ import numpy as np
 
 from .array_utils import as_numpy_block, iter_navigation_slices, parse_roi
 from .dataset import DatasetHandle
+from .logging import get_logger, log_block_progress
+
+log = get_logger(__name__)
 
 
 @dataclass(slots=True)
@@ -34,15 +37,20 @@ def compute_radial_fingerprints(
     profiles = np.zeros(out_shape, dtype=np.float32)
 
     bin_index, counts, radii = _radial_bin_index(sig_shape, geometry.get("center"), int(bins))
-    for ys, xs in iter_navigation_slices(out_shape[:2], block_shape):
+    blocks = list(iter_navigation_slices(out_shape[:2], block_shape))
+    n_blocks = len(blocks)
+    log.info("Computing radial fingerprints (%d bins) across %d navigation blocks", int(bins), n_blocks)
+
+    for idx, (ys, xs) in enumerate(blocks, start=1):
+        log_block_progress(log, block=idx, total_blocks=n_blocks, stage="fingerprints")
         src_y = slice(ys.start + y_slice.start, ys.stop + y_slice.start)
         src_x = slice(xs.start + x_slice.start, xs.stop + x_slice.start)
         block = as_numpy_block(dataset.data[src_y, src_x, :, :]).astype(np.float32, copy=False)
         flat = block.reshape((-1,) + sig_shape)
         prof = np.zeros((flat.shape[0], int(bins)), dtype=np.float32)
-        for idx, pattern in enumerate(flat):
+        for pidx, pattern in enumerate(flat):
             sums = np.bincount(bin_index.ravel(), weights=pattern.ravel(), minlength=int(bins))
-            prof[idx] = sums[: int(bins)] / np.maximum(counts, 1)
+            prof[pidx] = sums[: int(bins)] / np.maximum(counts, 1)
         profiles[ys, xs, :] = prof.reshape((ys.stop - ys.start, xs.stop - xs.start, int(bins)))
 
     result = FingerprintResult(profiles=profiles, radii=radii, roi=tuple(roi) if roi is not None else None, output_dir=Path(output_dir) if output_dir else None)
