@@ -143,11 +143,23 @@ def run_roi_bragg_for_rois(
     if max_rois is not None:
         rois = rois[:max_rois]
 
-    log.info("Loading 4D-STEM data from %s (mem=%s)", data_path, mem)
+    # Compute the original (pre-binned) scan shape.  manifest.nav_shape is
+    # *after* Stage-1 r_bin reduction, so we multiply back up.  This is
+    # correct when r_bin divides evenly; when it doesn't the original
+    # scan_shape should be provided explicitly via the parameter.
+    scan_shape: tuple[int, int] = (
+        manifest.nav_shape[0] * manifest.r_bin,
+        manifest.nav_shape[1] * manifest.r_bin,
+    )
+
+    log.info(
+        "Loading 4D-STEM data from %s (mem=%s, scan=%s)",
+        data_path, mem, scan_shape,
+    )
     cube = py4DSTEM.import_file(
         str(data_path),
         mem=mem,
-        scan=tuple(manifest.nav_shape),
+        scan=scan_shape,
     )
 
     results: list[ROIBraggResult] = []
