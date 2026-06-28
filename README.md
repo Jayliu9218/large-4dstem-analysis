@@ -1,36 +1,40 @@
 # large-4dstem-analysis
 
-Single non-visual workflow for large 4D-STEM data, focused on:
+End-to-end 4D-STEM analysis pipeline for large datasets: from raw data loading
+through unsupervised phase screening to crystallographic indexing.  Three-stage
+design with validated data contracts between stages.
 
-- Virtual BF/ADF/HAADF and COM imaging
-- Radial fingerprints and unsupervised phase screening
-- Candidate phase score maps
-- Low-resolution full-field orientation preview
-- ROI Bragg-disk detection via py4DSTEM (Stage 2A)
-- Sample mask generation for vacuum exclusion
+**What you get:**
+- **Stage 1** — Virtual images, radial fingerprints, unsupervised fingerprint
+  classes, orientation preview, sample mask, ROI candidates, QC diagnostics,
+  markdown + HTML report with ~40 PNG visualisations.
+- **Stage 2A** — Per-ROI Bragg disk detection via py4DSTEM with coordinate
+  mapping, beam-centre calibration, cluster/background validation, per-ROI
+  visualisations, and a human-readable report labelling which ROIs are ready
+  for indexing.
+- **Stage 2B** — Analytic kinematic template generation from CIF lattice
+  parameters, in-plane orientation matching against ROI mean diffraction
+  patterns, template-score and correlation-vs-angle visualisations, and a
+  stage-level indexing summary.
 
-The codebase is intentionally small: one package, one CLI module with three
-subcommands, YAML configs, and focused tests. Outputs are NumPy arrays, JSON
-metadata, and PNG previews — no Jupyter notebooks required.
+**Real-data verification** (Ti, 512×512×256×256 detector, 34 GB MIB):
+| Stage | Output | Result |
+|-------|--------|--------|
+| 1 | Fingerprint classes | 4 clusters on 256×256 nav (`r_bin=2`) |
+| 2A | Bragg detection | 6,750 peaks in `cluster0_core_01`, QC PASS |
+| 2B | Template matching | Ti-bcc, score 0.43 (medium), 62° orientation |
+
+All three stages run on the same dataset with validated handoff contracts.
 
 ---
 
 ## Installation
 
-### Quick: conda / mamba (recommended)
+### Quick: conda (recommended)
 
 ```bash
-# Create and activate the environment
 conda env create -f environment.yml
 conda activate large-4dstem
-
-# Install this package in editable mode
-pip install -e ".[test,large-data,diffraction]"
-```
-
-### Manual: pip only
-
-```bash
 pip install -e ".[test,large-data,diffraction]"
 ```
 
@@ -40,72 +44,158 @@ pip install -e ".[test,large-data,diffraction]"
 python -m fourdstem_pipeline.cli dry_run --config configs/default_workflow.yaml
 ```
 
-All commands use the `python -m fourdstem_pipeline.cli <subcommand>` form so
-they work regardless of whether the pip-installed scripts are on PATH.
+All commands use `python -m fourdstem_pipeline.cli <subcommand>` form so they
+work even if pip-installed scripts are not on PATH.
 
 ---
 
 ## Quick Start
 
 ```bash
-# 1. Validate your config — no data loaded, ~1 second
+# 1. Validate config — no data loaded, ~1 second
 python -m fourdstem_pipeline.cli dry_run --config configs/default_workflow.yaml
 
-# 2. Run Stage 1 on the synthetic demo dataset
+# 2. Stage 1 on synthetic demo dataset (16×16×64×64)
 python -m fourdstem_pipeline.cli run --config configs/default_workflow.yaml
 
-# 3. Run the test suite
+# 3. Run tests
 python -m pytest tests/ -v
+# Expected: ~49 passed, 1 skipped (real-data smoke test)
 ```
 
-The default config runs on `synthetic://demo` (a 16×16×64×64 toy dataset).
-Point `data.path` at a real `.mib`, `.npy`, or `.npz` file when ready.
+---
 
-### Real data workflow (end-to-end)
+## Three-Stage Workflow
 
-```bash
-# Step 0: Dry-run to check config and estimate memory
-python -m fourdstem_pipeline.cli dry_run --config configs/0617_4d_workflow.yaml
+### Stage 1 — Screening & Fingerprint Classes
 
-# Step 1: Stage 1 screening
-python -m fourdstem_pipeline.cli run --config configs/0617_4d_workflow.yaml
+```
+python -m fourdstem_pipeline.cli run --config configs/0617_4d_stage1_enhanced.yaml
+```
 
-# Step 2: Inspect the HTML report to pick ROIs
-#   → outputs/<run>/report.html
+**What it does:**
+1. Loads 4D-STEM data (MIB via HyperSpy, or .npy/.npz, or synthetic)
+2. Applies lazy preprocessing: `q_crop`, `q_bin`, `r_bin`
+3. Computes virtual images: BF, ADF, HAADF, COM-x, COM-y, ring images
+4. Generates sample mask (percentile threshold + morphological cleaning)
+5. Computes radial fingerprints (per-pixel radial intensity profiles)
+6. Runs unsupervised phase screening (PCA + NMF + KMeans clustering)
+7. Runs orientation preview (low-resolution template-free COM-angle proxy)
+8. Generates ROI candidates from: connected components, cluster boundaries,
+   orientation-score extremes, intensity anomalies
+9. Runs QC checks and writes `qc_summary.json` (PASS / PASS_WITH_WARNINGS / FAIL)
+10. Produces markdown + HTML report with ~40 diagnostic PNGs
 
-# Step 3: Run Stage 2A Bragg detection on those ROIs
+**Key outputs:**
+| File | Content |
+|------|---------|
+| `stage1_summary.json` | Canonical manifest bridging to Stage 2 |
+| `report.html` | Human-readable report with inline PNGs |
+| `qc_summary.json` | QC flags and PASS/FAIL verdict |
+| `virtual/virtual_images.npz` | BF, ADF, HAADF, ring, COM maps |
+| `fingerprints/radial_fingerprints.npy` | Per-pixel radial profiles |
+| `fingerprint_classes/fingerprint_class_labels.npy` | Unsupervised class labels |
+| `roi_candidates/roi_candidates.yaml` | ROI proposals with bboxes and rationale |
+| `orientation/orientation_index.npy` | Per-pixel orientation label |
+| `png/` | ~40 diagnostic PNGs |
+
+---
+
+### Stage 2A — ROI Bragg Detection
+
+```
 python -m fourdstem_pipeline.cli stage2 --config configs/stage2_roi_bragg.yaml
 ```
+
+**What it does:**
+1. Loads the Stage 1 manifest (`stage1_summary.json`)
+2. Reads ROI candidates from `roi_candidates.yaml`
+3. Loads the original 4D-STEM data via py4DSTEM (`import_file`)
+4. Converts ROI bboxes from binned (Stage 1) to raw (original scan) coordinates
+5. Extracts per-ROI 4D sub-cubes with navigation thinning (`thin_r`)
+6. Runs py4DSTEM `find_Bragg_disks()` on each ROI with detector binning (`bin_q`)
+7. Records beam centre provenance (Stage 1 COM → py4DSTEM calibration → fallback)
+8. Validates each ROI against fingerprint labels (background fraction) and sample mask
+9. Produces per-ROI visualisations: mean DP, Bragg vector map, Bragg overlay
+10. Generates `stage2_report.md`/`.html` with indexing-ready verdicts
+11. Generates `stage2_benchmark.json` with per-ROI timing and data sizes
+
+**Key outputs:**
+| File | Content |
+|------|---------|
+| `stage2_summary.json` | Aggregate results with both `stage1_bbox` and `raw_bbox` |
+| `stage2_qc_summary.json` | QC flags: NO_BRAGG_PEAKS, HIGH_BACKGROUND_ROIS, etc. |
+| `stage2_report.html` | Per-ROI table with [READY]/[REVIEW]/[SKIP] verdicts |
+| `stage2_benchmark.json` | Per-ROI extraction time, Bragg time, data size |
+| `roi_<name>/roi_data.npy` | Extracted 4D sub-cube (float32) |
+| `roi_<name>/bragg_vector_map.npy` | Calibrated Bragg peak positions |
+| `roi_<name>/bragg_summary.json` | Full per-ROI metadata |
+| `roi_<name>/mean_dp.png` | Log-scale mean diffraction pattern |
+| `roi_<name>/bragg_vector_map.png` | Bragg peak histogram |
+| `roi_<name>/bragg_overlay.png` | Mean DP + Bragg peaks (green crosses) |
+
+**Configurable parameters:**
+- `thin_r`, `bin_q` — navigation/detector binning for extraction
+- `corr_power`, `edge_boundary`, `min_relative_intensity`, `max_num_peaks`,
+  `min_peak_spacing`, `subpixel`, `cuda` — py4DSTEM Bragg detection
+- `max_rois` — cap number of ROIs processed
+- `scan_shape` — override raw navigation shape for py4DSTEM import
+
+---
+
+### Stage 2B — Crystallographic Indexing
+
+```
+python -m fourdstem_pipeline.cli stage2b --config configs/stage2_indexing.yaml
+```
+
+**What it does:**
+1. Reads Stage 2A `stage2_summary.json` and filters ROIs via `is_roi_ready_for_indexing()`
+2. Parses CIF files for lattice parameters (`_cell_length_*`, `_cell_angle_*`)
+3. Generates kinematic template stacks from the reciprocal lattice:
+   - Single-zone-axis orthographic projection (configurable `zone_axis`)
+   - In-plane orientation sweep (configurable `orientation_step_deg`)
+   - Gaussian spot rendering (`peak_sigma_px` controls disk width)
+   - Intensity ≈ `1/|q|^power` kinematic proxy
+4. Matches ROI mean diffraction patterns against all candidate templates
+   via normalized correlation
+5. Saves per-candidate template stacks and metadata to `templates/`
+6. Produces per-ROI visualisations: best template, template+DP overlay,
+   correlation-vs-angle bar chart
+7. Writes `stage2_indexing_summary.json` with geometry, scores, and match quality
+
+**Key outputs:**
+| File | Content |
+|------|---------|
+| `stage2_indexing_summary.json` | Best candidate, score, orientation, match quality |
+| `templates/<candidate>_template_stack.npy` | Full orientation template stack (float32) |
+| `templates/<candidate>_template_metadata.json` | Cell, HKL list, projection mode, beam centre |
+| `roi_<name>/template_best_match.png` | Best-matching template image |
+| `roi_<name>/template_match_overlay.png` | Mean DP (gray) + template spots (green) |
+| `roi_<name>/correlation_vs_angle.png` | Bar chart of correlation vs. orientation angle |
+
+**Configurable parameters:**
+- `max_index` — maximum HKL index for reciprocal spot generation (default 4)
+- `zone_axis` — reciprocal-space direction for orthographic projection (default `[0,0,1]`)
+- `orientation_step_deg` — in-plane rotation step (default 5°)
+- `peak_sigma_px` — Gaussian spot width in pixels (default 5.0, tuned for CBED)
+- `reciprocal_pixels_per_inv_angstrom` — calibrated scale, or null for auto-fit
+- `intensity_power` — kinematic intensity falloff exponent (default 2.0)
 
 ---
 
 ## CLI Reference
 
-All commands use the form `python -m fourdstem_pipeline.cli <subcommand>`.
-If you have the pip scripts directory on PATH you can also use the shorter
-`fourdstem-run`, `fourdstem-dry-run`, `fourdstem-stage2` forms directly.
+| Command | Module form | Purpose |
+|---------|-------------|---------|
+| `fourdstem-run` | `python -m fourdstem_pipeline.cli run` | Stage 1 screening |
+| `fourdstem-dry-run` | `python -m fourdstem_pipeline.cli dry_run` | Pre-flight config validation |
+| `fourdstem-stage2` | `python -m fourdstem_pipeline.cli stage2` | Stage 2A ROI Bragg detection |
+| `fourdstem-stage2b` | `python -m fourdstem_pipeline.cli stage2b` | Stage 2B indexing |
 
-### `run` — Stage 1 screening
-
-```
-python -m fourdstem_pipeline.cli run \
-    --config configs/default_workflow.yaml \
-    [--log-level DEBUG|INFO|WARNING|ERROR]
-```
-
-Loads a 4D-STEM dataset, preprocesses, computes virtual images
-(BF/ADF/HAADF/COM), radial fingerprints, unsupervised phase screening,
-orientation preview, sample mask, QC checks, and writes a Markdown+HTML report.
-
-Returns exit code 0 on success, 1 if any stage errors.
+All commands accept `--config <path>` and `--log-level DEBUG|INFO|WARNING|ERROR`.
 
 ### `dry_run` — pre-flight validation
-
-```
-python -m fourdstem_pipeline.cli dry_run \
-    --config configs/default_workflow.yaml \
-    [--json]
-```
 
 Without loading the full dataset, validates:
 - Config file exists and parses correctly
@@ -116,56 +206,36 @@ Without loading the full dataset, validates:
 - No unknown config keys
 - Existing results that would be overwritten
 
-Use `--json` to also print a machine-readable summary to stdout. A
-`dry_run_summary.json` is always saved to the output directory.
-
-Returns exit code 0 on OK/OK_WITH_WARNINGS, 1 on FAIL.
-
-### `stage2` — Stage 2A ROI Bragg detection
-
-```
-python -m fourdstem_pipeline.cli stage2 \
-    --config configs/stage2_roi_bragg.yaml \
-    [--log-level DEBUG|INFO|WARNING|ERROR]
-```
-
-Consumes a Stage-1 output directory, loads the validated `Stage1Manifest`,
-extracts per-ROI sub-cubes, runs py4DSTEM `find_Bragg_disks()` on each, and
-produces a `stage2_summary.json` + `stage2_qc_summary.json`.
-
-Requires py4DSTEM (dev branch).
-
-Returns exit code 0 if all ROIs succeed, 1 if any fail.
+Use `--json` to also print a machine-readable summary.
 
 ---
 
 ## Configuration
 
-All pipeline behavior is driven by a single YAML file. Here's the full
-structure:
+### Stage 1 (`configs/*.yaml`)
 
 ```yaml
-project:                          # Output naming
+project:
   name: my_experiment
   output_dir: outputs/my_run
 
-data:                             # Input data source
+data:
   path: synthetic://demo          # Or path/to/file.mib
-  lazy: true                      # Lazy/chunked loading
+  lazy: true
   cache: outputs/cache
-  scan_shape: [512, 512]          # Required for MIB files
+  scan_shape: [512, 512]          # Required for MIB
   chunks:
     navigation: [8, 8]
     signal: [64, 64]
 
-preprocess:                       # Data reduction
-  q_crop: null                    # [qy0, qy1, qx0, qx1] or null
-  q_bin: 1                        # Detector binning
-  r_bin: 1                        # Navigation binning
+preprocess:
+  q_crop: null                    # [qy0, qy1, qx0, qx1]
+  q_bin: 1
+  r_bin: 1
 
 geometry:
   center: null                    # [y, x] beam center override
-  radial_bins: 48                 # Number of radial bins
+  radial_bins: 48
 
 virtual_images:
   masks:
@@ -177,47 +247,36 @@ phase_screening:
   n_components: 3
   n_clusters: 3
   method: pca_nmf_cluster
-  candidate_phases:
-    - name: phase_alpha
-      reference_profile: null     # .npy path or null
+  candidate_phases: []
 
 orientation:
   preview_binning: [2, 2]
-  roi: [4, 12, 4, 12]           # [y0, y1, x0, x1] — y1>y0, x1>x0
+  roi: [4, 12, 4, 12]
   confidence_threshold: 0.05
 
 sample_mask:
   enabled: true
   source: adf
-  method: percentile
   percentile: 15
   fill_holes: true
   min_size: 100
   background_label: -1
-
-roi_bragg:                        # Optional Stage 1 inline Bragg
-  enabled: false                  # Set true to run during Stage 1
-  roi: [192, 320, 192, 320]
-  thin_r: 2
-  bin_q: 2
-  mem: MEMMAP
 ```
 
-### Stage 2A configuration
+### Stage 2A (`configs/stage2_roi_bragg.yaml`)
 
 ```yaml
-# configs/stage2_roi_bragg.yaml
-stage1_dir: outputs/my_run        # Path to Stage-1 output
-# data_path: data/file.mib        # Optional: override data path
+stage1_dir: outputs/my_run
+data_path: null                   # null = use provenance.json
 output_dir: null                  # null = <stage1_dir>/stage2/roi_bragg/
 roi_source: roi_candidates        # "roi_candidates" or path to YAML
-max_rois: null                    # Cap ROIs (null = all)
+max_rois: null                    # null = all candidates
+scan_shape: null                  # null = nav_shape * r_bin
 
-thin_r: 2                         # Navigation thinning
-bin_q: 2                          # Detector binning
-mem: MEMMAP                       # "MEMMAP" or "RAM"
+thin_r: 2
+bin_q: 2
+mem: MEMMAP
 
-# py4DSTEM Bragg disk parameters
 corr_power: 1.0
 sigma_cc: 1
 edge_boundary: 10
@@ -228,111 +287,218 @@ max_num_peaks: 70
 cuda: false
 ```
 
+### Stage 2B (`configs/stage2_indexing.yaml`)
+
+```yaml
+stage2_dir: outputs/my_run/stage2/roi_bragg
+output_dir: null                  # null = <stage2_dir>/stage2b_indexing/
+
+template_generation:
+  max_index: 4
+  zone_axis: [0, 0, 1]
+  orientation_step_deg: 5
+  peak_sigma_px: 5.0
+  reciprocal_pixels_per_inv_angstrom: null
+  intensity_power: 2.0
+
+candidate_cifs:
+  - name: Ti-bcc
+    phase: Ti-bcc
+    path: data/0617-4d/Ti-bcc.cif
+  - name: Ti-hcp
+    phase: Ti-hcp
+    path: data/0617-4d/Ti-hcp.cif
+```
+
 ---
 
 ## Output Directory Structure
 
-After a Stage 1 run:
-
 ```
 outputs/<run>/
-├── stage1_summary.json          # Canonical manifest (Stage 1 → 2 bridge)
-├── workflow_summary.json        # Full pipeline metadata
-├── data_contract.json           # Axis / bbox / center conventions
-├── provenance.json              # Git commit, package versions, timestamps
-├── qc_summary.json              # QC flags and PASS/FAIL verdict
-├── preprocess_info.json         # Crop/bin params, shapes
-├── report.md                    # Human-readable summary
-├── report.html                  # HTML report with inline PNGs
-├── dry_run_summary.json         # (if dry-run was used)
+├── stage1_summary.json              # Canonical manifest (Stage 1 → 2 bridge)
+├── workflow_summary.json            # Full pipeline metadata
+├── report.md / report.html          # Human-readable Stage 1 report
+├── qc_summary.json                  # QC flags and PASS/FAIL verdict
+├── provenance.json                  # Git commit, versions, timestamps
+├── data_contract.json               # Axis / bbox / center conventions
+├── preprocess_info.json             # Crop/bin params, shapes
 │
-├── virtual/
-│   ├── virtual_images.npz       # BF, ADF, HAADF, ring images, COM maps
-│   └── com_x.npy, com_y.npy
+├── virtual/                         # Virtual images (BF, ADF, HAADF, COM, rings)
+├── fingerprints/                    # Radial profiles + axis
+├── fingerprint_classes/             # Class labels, cluster stats, mean profiles
+├── orientation/                     # Orientation index + confidence maps
+├── 00_preprocess/                   # Beam centre estimate, sample mask .npy
+├── png/                             # ~40 diagnostic PNGs
+├── roi_candidates/                  # ROI proposals (YAML + CSV)
+├── 05_cluster_diagnostics/          # Per-cluster mean DPs, profiles
 │
-├── fingerprints/
-│   ├── radial_fingerprints.npy  # Per-pixel radial profiles
-│   └── radial_axis.npy          # Radial bin centers
+├── stage2/roi_bragg/                # ── Stage 2A ──
+│   ├── stage2_summary.json
+│   ├── stage2_qc_summary.json
+│   ├── stage2_report.md / .html
+│   ├── stage2_benchmark.json
+│   ├── provenance.json
+│   └── roi_<name>/
+│       ├── roi_data.npy             # 4D sub-cube
+│       ├── bragg_vector_map.npy     # Bragg peaks
+│       ├── bragg_summary.json       # Full per-ROI metadata
+│       ├── mean_dp.png              # Log-scale mean DP
+│       ├── bragg_vector_map.png     # Bragg peak histogram
+│       ├── bragg_overlay.png        # Mean DP + Bragg peaks
+│       ├── template_best_match.png  # (from Stage 2B)
+│       ├── template_match_overlay.png
+│       └── correlation_vs_angle.png
 │
-├── fingerprint_classes/
-│   ├── fingerprint_class_labels.npy        # Per-pixel class labels
-│   ├── cluster_summary.csv                # Per-cluster statistics
-│   └── cluster_mean_radial_profiles.npy   # Mean profile per class
-│
-├── orientation/
-│   ├── orientation_index.npy    # Per-pixel orientation label
-│   └── orientation_score.npy    # Per-pixel orientation confidence
-│
-├── sample_mask/
-│   ├── sample_mask.npy          # Boolean sample mask
-│   └── sample_mask_stats.csv    # Coverage statistics
-│
-├── png/                         # Visual diagnostics (~35-40 PNGs)
-│   ├── virtual_bf.png, virtual_adf.png, virtual_haadf.png
-│   ├── mean_dp_log.png, max_diffraction.png
-│   ├── mean_radial_profile.png
-│   ├── fingerprint_class_labels_annotated.png
-│   ├── cluster_mean_dp_*.png, cluster_mean_radial_profiles_*.png
-│   ├── orientation_index.png, orientation_score.png
-│   ├── roi_candidates_overlay.png
-│   ├── sample_mask.png, sample_mask_overlay_adf.png
-│   └── ... (ring ratios, COM maps, candidate scores, etc.)
-│
-├── roi_candidates/
-│   └── roi_candidates.yaml      # ROI proposals with bboxes and rationale
-│
-└── 05_cluster_diagnostics/      # Per-cluster diagnostics (arrays only)
-    ├── cluster_*_mean_dp.npy
-    └── cluster_*_radial_profiles.npy
-```
-
-After a Stage 2A run:
-
-```
-outputs/<run>/stage2/roi_bragg/
-├── stage2_summary.json
-├── stage2_qc_summary.json
-├── provenance.json
-│
-└── roi_<name>/
-    ├── roi_data.npy             # Extracted 4D sub-cube
-    ├── bragg_vector_map.npy     # Calibrated Bragg peak positions
-    └── bragg_summary.json       # Peak count, detection params
+│   └── stage2b_indexing/            # ── Stage 2B ──
+│       ├── stage2_indexing_summary.json
+│       └── templates/
+│           ├── <candidate>_template_stack.npy
+│           └── <candidate>_template_metadata.json
 ```
 
 ---
 
 ## Coordinate Conventions
 
-The pipeline follows a single unified data contract (`data_contract.json`):
+All stages follow a unified data contract (`data_contract.json`):
 
-- **Axis order**: `nav_y, nav_x, q_y, q_x` (navigation rows, navigation columns,
-  diffraction rows, diffraction columns).
-- **BBox / ROI order**: `y0, y1, x0, x1` (row start, row end, column start,
-  column end). Python slice semantics: `y0` is inclusive, `y1` is exclusive.
-- **Center order**: `y, x` (row first, column second). The geometric center of a
-  detector of shape `(H, W)` is `((H-1)/2, (W-1)/2)`.
+| Convention | Order | Example |
+|------------|-------|---------|
+| Axis order | `nav_y, nav_x, q_y, q_x` | `data[ny, nx, qy, qx]` |
+| BBox / ROI | `y0, y1, x0, x1` | `[10, 20, 30, 40]` |
+| Centre | `y, x` (row, column) | `[cy, cx]` |
 
-All array indexing and ROI specifications throughout the pipeline use this
-convention. When configuring `orientation.roi` or `roi_bragg.roi`, ensure
-`y1 > y0` and `x1 > x0` — zero-area ROIs are rejected with a clear error.
+- **Stage 1 ROI bboxes** are in binned (preprocessed) navigation coordinates.
+- **Stage 2A raw bboxes** are in original scan coordinates (multiplied by `r_bin`).
+- **Beam centre** is recorded as `[qy, qx]` in detector pixels.  Stage 2A
+  converts the Stage 1 COM estimate from preprocessed to raw detector
+  coordinates using `q_crop` and `q_bin`.
+
+---
+
+## Config Presets
+
+| File | Purpose |
+|------|---------|
+| `default_workflow.yaml` | Synthetic smoke-test (16×16×64×64) |
+| `0617_4d_workflow.yaml` | Ti data: 128×128 screening, `r_bin=4` |
+| `0617_4d_workflow_rbin1.yaml` | Ti data: full 512×512 nav |
+| `0617_4d_workflow_rbin2.yaml` | Ti data: 256×256 nav, `r_bin=2` |
+| `0617_4d_stage1_enhanced.yaml` | Ti data: enhanced QC, fingerprint-class screening |
+| `stage2_roi_bragg.yaml` | Stage 2A Bragg detection |
+| `stage2_smoke_test.yaml` | Stage 2A smoke test (`max_rois: 1`) |
+| `stage2_indexing.yaml` | Stage 2B indexing with CIF candidates |
+
+---
+
+## Real-Data Results (Ti, 34 GB MIB)
+
+```
+Data:     512×512 scan × 256×256 detector, 0.75 mrad, 26,000× mag
+Config:   0617_4d_stage1_enhanced.yaml (r_bin=2, q_crop=[16,240,16,240], q_bin=2)
+```
+
+| Stage | Metric | Value |
+|-------|--------|-------|
+| **1** | Fingerprint classes | 4 |
+| **1** | Navigation shape | 256×256 |
+| **1** | Signal shape (preprocessed) | 112×112 |
+| **1** | QC status | PASS_WITH_WARNINGS |
+| **1** | ROI candidates | 10 |
+| | | |
+| **2A** | ROI processed | `cluster0_core_01` |
+| **2A** | Raw bbox | `[0, 128, 272, 400]` |
+| **2A** | ROI nav shape | 64×64 |
+| **2A** | Bragg peaks detected | 6,750 |
+| **2A** | Beam centre source | `stage1_com` |
+| **2A** | Beam centre (raw) | `[126.8, 125.7]` |
+| **2A** | Background fraction | 0.0% |
+| **2A** | QC status | PASS |
+| **2A** | Extraction time | 0.42 s |
+| **2A** | Bragg detection time | 4.65 s |
+| **2A** | Total elapsed | 10.7 s |
+| | | |
+| **2B** | Candidates | Ti-bcc (cubic, a=3.25 Å), Ti-hcp (hex, a=4.57 Å, c=2.83 Å) |
+| **2B** | Templates generated | 360 (180 per candidate, 2° step) |
+| **2B** | **Best candidate** | **Ti-bcc** |
+| **2B** | **Template score** | **0.433 (medium)** |
+| **2B** | **Best orientation** | **62.0°** |
+| **2B** | Auto-scale | 57.7 px/Å (auto-fit to detector) |
+| **2B** | Elapsed | 8.2 s |
+
+### Parameter Tuning Notes
+
+`peak_sigma_px` controls the Gaussian spot width in the kinematic template.
+The default of 5.0 was calibrated against this dataset:
+
+| `peak_sigma_px` | Score | Quality |
+|-----------------|-------|---------|
+| 1.2 | 0.17 | low |
+| 3.0 | 0.34 | low |
+| 4.0 | 0.40 | medium |
+| **5.0** | **0.43** | **medium** |
+| 6.0 | 0.43 | medium |
+
+The 62° orientation is stable across sigma values and orientation step sizes
+(5° → 2° → 1°), confirming a real crystallographic signal.
+
+---
+
+## Package Structure
+
+```
+src/fourdstem_pipeline/
+├── cli.py                  # CLI: run, dry_run, stage2, stage2b
+├── workflow.py             # Stage 1 orchestration
+├── stage2.py               # Stage 2A orchestration
+├── roi_bragg.py            # py4DSTEM Bragg disk detection
+├── indexing.py             # Stage 2B CIF-to-template matching
+├── export.py               # PNG writer, Stage 1 report (md + html)
+├── export_stage2.py        # Stage 2A report + benchmark
+├── contracts.py            # DataContract, Stage1Manifest, is_roi_ready_for_indexing
+├── config.py               # YAML config loading + validation
+├── loaders.py              # synthetic, NumPy, NPZ, HyperSpy/MIB
+├── preprocess.py           # lazy q_crop, q_bin, r_bin
+├── virtual.py              # BF/ADF/HAADF/COM/ring computation
+├── masks.py                # annular mask generation
+├── fingerprints.py         # radial fingerprint profiles
+├── phase.py                # PCA + NMF + KMeans phase screening
+├── orientation.py          # orientation preview (COM-angle proxy)
+├── sample_mask.py          # sample/vacuum mask + label masking
+├── diagnostics.py          # cluster diagnostics orchestration
+├── diagnostics_cluster.py  # per-cluster mean DPs, profiles, stats
+├── diagnostics_spatial.py  # beam centre, connected components, ROI candidates
+├── qc.py                   # quality control checks
+├── provenance.py           # runtime dependency + provenance reporting
+├── synthetic.py            # synthetic 4D-STEM demo generator
+├── dataset.py              # DatasetHandle dataclass
+├── array_utils.py          # ROI parsing, normalisation, sub-pixel
+└── logging.py              # structured logging (FOURDSTEM_LOG_LEVEL)
+```
+
+---
+
+## Data Contracts Between Stages
+
+| Contract | File | Purpose |
+|----------|------|---------|
+| Coordinate conventions | `data_contract.json` | Axis/bbox/centre order |
+| Stage 1 → 2A | `stage1_summary.json` | Shapes, paths, r_bin, q_crop, q_bin, QC status |
+| Stage 1 → 2A | `roi_candidates.yaml` | ROI name, bbox (binned coords), cluster, reason |
+| Stage 2A per-ROI | `bragg_summary.json` | Both bboxes, beam centre, peaks, params, validation |
+| Stage 2A aggregate | `stage2_summary.json` | All ROI results + provenance |
+| Stage 2A → 2B gate | `is_roi_ready_for_indexing()` | Shared filter: peaks>0, bg≤50%, sample>0, beam calibrated |
+| Stage 2B output | `stage2_indexing_summary.json` | Best candidate, scores, orientations, match quality |
 
 ---
 
 ## Troubleshooting
 
-### Python not found or empty output (Windows)
+### Python not found (Windows)
 
-The Windows Store Python stub at
-`%LOCALAPPDATA%/Microsoft/WindowsApps/python.exe` does not work in
-non-interactive shells. Use Miniconda Python instead:
-
-```powershell
-# In PowerShell
-C:/ProgramData/miniconda3/python.exe -m fourdstem_pipeline.cli dry_run --config configs/default_workflow.yaml
-```
-
-Or activate the conda environment first:
+The Windows Store Python stub does not work in non-interactive shells.
+Use Miniconda Python or activate the environment first:
 
 ```powershell
 conda activate large-4dstem
@@ -341,177 +507,59 @@ python -m fourdstem_pipeline.cli dry_run --config configs/default_workflow.yaml
 
 ### CLI commands not found
 
-If you see `command not found` for `fourdstem-run` etc., pip installed the
-scripts to a directory that isn't on your PATH. Use the module form instead:
+Use the module form — works identically and doesn't require PATH configuration:
 
 ```bash
 python -m fourdstem_pipeline.cli run --config configs/default_workflow.yaml
-python -m fourdstem_pipeline.cli dry_run --config configs/default_workflow.yaml
 python -m fourdstem_pipeline.cli stage2 --config configs/stage2_roi_bragg.yaml
+python -m fourdstem_pipeline.cli stage2b --config configs/stage2_indexing.yaml
 ```
-
-These work identically and don't require PATH configuration.
-
-### Orientation ROI with zero area
-
-If the pipeline reports `ORIENTATION_ROI_INVALID` in `qc_summary.json`, the
-configured `orientation.roi` has zero or negative height/width. For example:
-
-```yaml
-orientation:
-  roi: [64, 64, 192, 192]   # ERROR: y1 == y0, zero height
-```
-
-The fix is to ensure `y1 > y0` and `x1 > x0`:
-
-```yaml
-orientation:
-  roi: [64, 192, 64, 192]   # Correct: [y0, y1, x0, x1]
-```
-
-### Orientation preview skipped
-
-Orientation preview can fail for several reasons:
-- Zero-area ROI (see above).
-- The configured ROI falls entirely outside the navigation shape after binning.
-- Template matching failed because no candidate phases with valid templates
-  were provided.
-
-When orientation is skipped, orientation-dependent diagnostics (reliability
-maps, ROI candidates based on orientation scores) are not generated, but all
-other diagnostics and the report are still produced.
 
 ### Stage 2A: py4DSTEM not installed
 
 ```bash
-pip install -e ".[diffraction]"
-# or directly from the dev branch:
 pip install git+https://github.com/py4dstem/py4DSTEM.git@dev
 ```
 
 ### Stage 2A: "Cannot determine data file path"
 
-The Stage 2 config needs to find the original MIB file. Either:
-- Set `data_path` in `configs/stage2_roi_bragg.yaml`, or
-- Ensure `provenance.json` in the Stage 1 output has a valid `input_path`.
+Either set `data_path` in the Stage 2 config, or ensure the Stage 1 output's
+`provenance.json` has a valid `input_path`.
+
+### Stage 2B: low template scores
+
+1. Verify `peak_sigma_px` matches your convergence angle (try 3–6 for CBED).
+2. Set `reciprocal_pixels_per_inv_angstrom` if you know the camera length.
+3. Try different `zone_axis` values — real grains may not be on `[0,0,1]`.
+4. Check that `beam_center_yx` in `bragg_summary.json` matches the detector shape.
 
 ### Binning truncation
 
-When `q_bin` or `r_bin` doesn't evenly divide the detector or navigation
-dimensions, edge pixels are truncated. The pipeline logs warnings when this
-happens. Choose bin factors that divide your dimensions evenly.
+When `q_bin` or `r_bin` doesn't evenly divide dimensions, edge pixels are
+truncated. The pipeline logs warnings. Choose bin factors that divide evenly.
 
-### Emoji display (mojibake) in reports
+### Emoji display
 
-QC status is rendered as ASCII labels (`[PASS]`, `[WARN]`, `[FAIL]`, `[N/A]`)
-for maximum compatibility across platforms, terminals, and text editors.
-
----
-
-## Large Data Policy
-
-The default workflow avoids materializing a full 4D dataset. Virtual images,
-radial fingerprints, and orientation previews are computed in navigation blocks.
-Expensive orientation matching defaults to a downsampled preview plus ROI
-refinement.
-
-For real MIB data, install the optional large-data stack. MIB loading goes
-through HyperSpy/RosettaSciIO, and `backend: hyperspy_pyxem` asks the loader to
-register pyxem diffraction semantics when pyxem is available while keeping the
-block-wise fallback path intact.
-
-`load_dataset()` will try HyperSpy lazy loading first for `.mib` files.
-Use `preprocess.q_crop`, `preprocess.q_bin`, and `preprocess.r_bin` to reduce
-large data before phase screening.
-
-For the `data/0617-4d` folder, start with:
-
-```bash
-python -m fourdstem_pipeline.cli run --config configs/0617_4d_workflow.yaml
-```
-
-That preset chooses one 512×512 MIB scan, crops the central diffraction region,
-bins diffraction 2×, and bins scan navigation 4× for a 128×128 screening run.
+All report verdicts use ASCII labels (`[READY]`, `[REVIEW]`, `[FAIL]`, `[PASS]`)
+for maximum compatibility across terminals and text editors.
 
 ---
 
 ## Development
 
-### Setup
-
 ```bash
-conda env create -f environment.yml
 conda activate large-4dstem
 pip install -e ".[test,large-data,diffraction]"
-```
-
-### Run tests
-
-```bash
 python -m pytest tests/ -v
+# Expected: ~49 passed, 1 skipped
 ```
 
-### Run with debug logging
+### Real-data smoke tests
 
 ```bash
-python -m fourdstem_pipeline.cli run --config configs/default_workflow.yaml --log-level DEBUG
+# Stage 2A (requires py4DSTEM + real MIB data)
+FOURDSTEM_REAL_DATA=1 python -m pytest tests/ -k test_stage2_real_data_smoke -v
+
+# Stage 2B (requires CIF files + Stage 2A output)
+python -m fourdstem_pipeline.cli stage2b --config configs/stage2_indexing.yaml
 ```
-
-### Running without pip install
-
-```bash
-# Use the script entry point
-python scripts/run_workflow.py --config configs/default_workflow.yaml
-
-# Or the CLI module directly
-python -m fourdstem_pipeline.cli run --config configs/default_workflow.yaml
-```
-
-### Package structure
-
-```
-src/fourdstem_pipeline/
-├── cli.py              # CLI entry points (run, dry_run, stage2 subcommands)
-├── workflow.py         # Stage 1 orchestration
-├── stage2.py           # Stage 2A orchestration
-├── roi_bragg.py        # py4DSTEM Bragg disk detection per ROI
-├── loaders.py          # synthetic, NumPy, NPZ, HyperSpy data loading
-├── preprocess.py       # lazy q_crop, q_bin, r_bin reduction
-├── virtual.py          # virtual BF/ADF/HAADF/COM image computation
-├── masks.py            # annular mask generation
-├── fingerprints.py     # radial fingerprint computation
-├── phase.py            # unsupervised phase screening (PCA+NMF+clustering)
-├── orientation.py      # orientation preview
-├── sample_mask.py      # sample/vacuum mask generation
-├── diagnostics.py      # cluster diagnostics, ring ratios, statistics
-├── diagnostics_cluster.py   # per-cluster visualizations
-├── diagnostics_spatial.py   # spatial diagnostics
-├── qc.py               # quality control checks
-├── provenance.py       # runtime dependency reporting
-├── export.py           # report generation (Markdown, HTML, PNG writing)
-├── contracts.py        # DataContract and Stage1Manifest
-├── config.py           # YAML config loading and validation
-├── dataset.py          # DatasetHandle dataclass
-└── logging.py          # structured logging
-```
-
----
-
-## Framework
-
-- **Data loading**: `loaders.py` — synthetic, NumPy, NPZ, or HyperSpy-backed.
-- **Preprocessing**: `preprocess.py` — lazy `q_crop`, `q_bin`, and `r_bin` reduction.
-- **Workflow**: `workflow.py` — single orchestration path for all Stage 1 stages.
-- **Stage 2A**: `stage2.py` + `roi_bragg.py` — py4DSTEM Bragg disk detection per ROI.
-- **Contract**: `contracts.py` — `DataContract` coordinate conventions and `Stage1Manifest` bridge validation.
-
-### Config presets
-
-| File | Purpose |
-|---|---|
-| `configs/default_workflow.yaml` | Synthetic smoke-test (16×16×64×64) |
-| `configs/0617_4d_workflow.yaml` | Real-data: 128×128 screening with 4× r_bin |
-| `configs/0617_4d_workflow_rbin1.yaml` | Real-data: full 512×512, no navigation binning |
-| `configs/0617_4d_workflow_rbin2.yaml` | Real-data: 256×256 with 2× r_bin |
-| `configs/0617_4d_stage1_enhanced.yaml` | Real-data: enhanced QC with sample mask |
-| `configs/stage2_roi_bragg.yaml` | Stage 2A Bragg detection configuration |
