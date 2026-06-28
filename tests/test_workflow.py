@@ -916,6 +916,25 @@ class WorkflowTests(unittest.TestCase):
         for text in (md, html):
             self.assertTrue(all(ord(ch) < 128 for ch in text))
 
+    def test_stage2_indexing_readiness_contract_shared(self):
+        """Stage 2A report and Stage 2B use one shared ROI readiness rule."""
+        from fourdstem_pipeline.contracts import is_roi_ready_for_indexing
+        from fourdstem_pipeline.export_stage2 import _indexing_verdict
+
+        roi = {
+            "error": None,
+            "n_bragg_peaks": 5,
+            "background_fraction": 0.0,
+            "sample_mask_coverage": 1.0,
+            "beam_center_source": "stage1_com",
+        }
+        self.assertTrue(is_roi_ready_for_indexing(roi))
+        self.assertEqual(_indexing_verdict(roi), "[READY] Ready")
+
+        roi["beam_center_source"] = "detector_center_fallback"
+        self.assertFalse(is_roi_ready_for_indexing(roi))
+        self.assertEqual(_indexing_verdict(roi), "[REVIEW] Review (no calib)")
+
     def test_stage2b_indexing_contract_with_mock_candidates(self):
         """Stage 2B scaffold consumes accepted Stage 2A ROIs and CIF metadata."""
         from fourdstem_pipeline.indexing import run_stage2_indexing
@@ -969,9 +988,90 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(summary["accepted_roi_count"], 1)
         self.assertEqual(summary["candidate_cifs"][0]["phase"], "mock_phase")
         self.assertIsNotNone(summary["candidate_cifs"][0]["sha256"])
+        self.assertEqual(summary["candidate_cifs"][0]["scoring_mode"], "mock_peak_count")
+        self.assertEqual(summary["output_dir"], str(output_dir))
         self.assertEqual(summary["roi_results"][0]["name"], "roi_good")
         self.assertEqual(summary["roi_results"][0]["best_candidate"], "candidate")
         self.assertEqual(summary["roi_results"][0]["phase_score"], 1.0)
+        self.assertEqual(summary["roi_results"][0]["match_quality"], "mock_scored")
+
+    def test_stage2b_missing_candidate_cif_records_null_hash(self):
+        """Missing CIF provenance is non-fatal and records sha256 as null."""
+        from fourdstem_pipeline.indexing import run_stage2_indexing
+
+        stage2_dir = self.output_dir / "stage2a"
+        stage2_dir.mkdir()
+        (stage2_dir / "stage2_summary.json").write_text(
+            json.dumps({
+                "run_name": "mock_stage2a",
+                "roi_results": [
+                    {
+                        "name": "roi_good",
+                        "error": None,
+                        "n_bragg_peaks": 4,
+                        "background_fraction": 0.0,
+                        "sample_mask_coverage": 1.0,
+                        "beam_center_source": "stage1_com",
+                    },
+                ],
+            }),
+            encoding="utf-8",
+        )
+
+        summary = run_stage2_indexing({
+            "stage2_dir": str(stage2_dir),
+            "output_dir": str(self.output_dir / "stage2b_missing_cif"),
+            "candidate_cifs": [
+                {"name": "missing", "path": str(self.output_dir / "missing.cif")}
+            ],
+        })
+
+        self.assertIsNone(summary["candidate_cifs"][0]["sha256"])
+        self.assertEqual(summary["roi_results"][0]["match_quality"], "not_scored")
+
+    def test_stage2b_cli_entrypoint(self):
+        """Stage 2B is available through the CLI module and pyproject script."""
+        import io
+        import yaml
+        from unittest.mock import patch
+        from fourdstem_pipeline.cli import stage2b
+
+        stage2_dir = self.output_dir / "stage2a"
+        stage2_dir.mkdir()
+        (stage2_dir / "stage2_summary.json").write_text(
+            json.dumps({
+                "run_name": "mock_stage2a",
+                "roi_results": [
+                    {
+                        "name": "roi_good",
+                        "error": None,
+                        "n_bragg_peaks": 2,
+                        "background_fraction": 0.0,
+                        "sample_mask_coverage": 1.0,
+                        "beam_center_source": "stage1_com",
+                    },
+                ],
+            }),
+            encoding="utf-8",
+        )
+        cfg_path = self.output_dir / "stage2b.yaml"
+        cfg_path.write_text(
+            yaml.safe_dump({
+                "stage2_dir": str(stage2_dir),
+                "output_dir": str(self.output_dir / "stage2b_cli"),
+                "candidate_cifs": [],
+            }),
+            encoding="utf-8",
+        )
+
+        with patch.object(sys, "argv", ["fourdstem-stage2b", "--config", str(cfg_path)]), \
+             patch("sys.stdout", new=io.StringIO()) as stdout:
+            stage2b()
+
+        self.assertIn("Stage 2B contract complete", stdout.getvalue())
+        self.assertTrue((self.output_dir / "stage2b_cli" / "stage2_indexing_summary.json").exists())
+        pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('fourdstem-stage2b = "fourdstem_pipeline.cli:stage2b"', pyproject)
 
 
     # ------------------------------------------------------------------

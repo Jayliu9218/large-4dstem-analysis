@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .contracts import is_roi_ready_for_indexing
+
 
 def save_stage2_report(output_dir: Path, summary: dict[str, Any]) -> tuple[Path, Path]:
     """Write ``stage2_report.md`` and ``stage2_report.html``.
@@ -227,8 +229,8 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
         lines.append("")
 
     # --- Indexing candidates ---------------------------------------------
-    ready = [r for r in roi_results if not r.get("error") and _is_indexing_ready(r)]
-    not_ready = [r for r in roi_results if not r.get("error") and not _is_indexing_ready(r)]
+    ready = [r for r in roi_results if is_roi_ready_for_indexing(r)]
+    not_ready = [r for r in roi_results if not r.get("error") and not is_roi_ready_for_indexing(r)]
     failed = [r for r in roi_results if r.get("error")]
 
     if ready:
@@ -467,24 +469,6 @@ def _indexing_verdict(roi: dict[str, Any]) -> str:
     if warning:
         return "[REVIEW] Review"
     return "[READY] Ready"
-
-
-def _is_indexing_ready(roi: dict[str, Any]) -> bool:
-    """Return True if this ROI is suitable for Stage 2B indexing."""
-    n_peaks = roi.get("n_bragg_peaks", 0) or 0
-    bg_frac = roi.get("background_fraction")
-    sample_cov = roi.get("sample_mask_coverage")
-    beam_source = roi.get("beam_center_source", "")
-
-    if n_peaks == 0:
-        return False
-    if bg_frac is not None and bg_frac > 0.5:
-        return False
-    if sample_cov is not None and sample_cov == 0.0:
-        return False
-    if beam_source == "detector_center_fallback":
-        return False
-    return True
 
 
 def _indexing_blockers(roi: dict[str, Any]) -> list[str]:

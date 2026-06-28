@@ -6,6 +6,8 @@
     Validate configuration and estimate resources without loading data.
 ``fourdstem-stage2``
     Execute Stage 2A ROI Bragg detection on a Stage-1 output directory.
+``fourdstem-stage2b``
+    Create the Stage 2B indexing summary contract from Stage 2A outputs.
 """
 
 from __future__ import annotations
@@ -131,6 +133,37 @@ def stage2() -> None:
         sys.exit(1)
     else:
         print(f"  Output: {result.output_dir}\n")
+
+
+def stage2b() -> None:
+    """``fourdstem-stage2b`` - create the Stage 2B indexing contract."""
+    parser = argparse.ArgumentParser(
+        description="4D-STEM Stage 2B: Phase / Orientation Indexing Contract",
+    )
+    parser.add_argument(
+        "--config",
+        default="configs/stage2_indexing.yaml",
+        help="Path to Stage 2B YAML configuration  [default: configs/stage2_indexing.yaml]",
+    )
+    args = parser.parse_args()
+
+    from .indexing import run_stage2_indexing
+
+    try:
+        summary = run_stage2_indexing(config=args.config)
+    except Exception as exc:
+        print(f"\nStage 2B failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    stage2a = summary.get("stage2a", {})
+
+    print(
+        "\nStage 2B contract complete: "
+        f"{summary.get('accepted_roi_count', 0)} accepted ROI(s), "
+        f"{len(summary.get('candidate_cifs', []))} candidate CIF(s)."
+    )
+    print(f"  Stage 2A: {stage2a.get('summary_path', '?')}")
+    print(f"  Output: {summary.get('output_dir', '?')}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -645,6 +678,7 @@ _SUBCOMMANDS: dict[str, str] = {
     "run": "Execute the Stage-1 workflow",
     "dry_run": "Validate configuration without loading data",
     "stage2": "Execute Stage 2A ROI Bragg detection",
+    "stage2b": "Create the Stage 2B indexing summary contract",
 }
 
 
@@ -665,6 +699,8 @@ def _main() -> None:
         dry_run()
     elif subcommand == "stage2":
         stage2()
+    elif subcommand == "stage2b":
+        stage2b()
 
 
 if __name__ == "__main__":

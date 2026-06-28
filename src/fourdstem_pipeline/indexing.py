@@ -9,11 +9,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from .contracts import is_roi_ready_for_indexing
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -47,7 +52,8 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
     The current implementation is intentionally lightweight. It validates the
     Stage 2A handoff, records candidate CIF provenance, and provides a
     deterministic mock-friendly score when a candidate supplies
-    ``reference_peaks`` in the config.
+    ``reference_peaks`` in the config. That score is labelled ``mock_scored``
+    and must not be interpreted as crystallographic indexing.
     """
     cfg, base_dir = _load_indexing_config(config)
     stage2_dir = _resolve_path(cfg["stage2_dir"], base_dir)
@@ -63,7 +69,7 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
     candidates = _load_candidates(cfg.get("candidate_cifs", []), base_dir)
     accepted_rois = [
         roi for roi in stage2a_summary.get("roi_results", [])
-        if _roi_ready_for_indexing(roi)
+        if is_roi_ready_for_indexing(roi)
     ]
 
     roi_results = [
@@ -80,6 +86,7 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
             "summary_path": str(stage2a_summary_path),
             "run_name": stage2a_summary.get("run_name"),
         },
+        "output_dir": str(output_dir),
         "candidate_cifs": [
             {
                 "name": c.name,
@@ -87,6 +94,7 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
                 "path": str(c.path),
                 "sha256": c.sha256,
                 "reference_peak_count": len(c.reference_peaks),
+                "scoring_mode": "mock_peak_count" if c.reference_peaks else "not_scored",
             }
             for c in candidates
         ],
@@ -146,7 +154,7 @@ def _load_candidates(items: list[dict[str, Any]], base_dir: Path) -> list[Indexi
                 phase=item.get("phase"),
                 path=path,
                 reference_peaks=tuple(item.get("reference_peaks") or ()),
-                sha256=_sha256_file(path) if path.exists() else None,
+                sha256=_sha256_file(path),
             )
         )
     return candidates
@@ -190,37 +198,8 @@ def _score_roi_against_candidates(
         best_candidate=best_candidate.name,
         phase_score=best_score,
         orientation_score=None,
-        match_quality=_quality_label(best_score),
+        match_quality="mock_scored",
     )
-
-
-def _roi_ready_for_indexing(roi: dict[str, Any]) -> bool:
-    if roi.get("error"):
-        return False
-    n_peaks = roi.get("n_bragg_peaks", 0) or 0
-    bg_frac = roi.get("background_fraction")
-    sample_cov = roi.get("sample_mask_coverage")
-    beam_source = roi.get("beam_center_source", "")
-
-    if n_peaks <= 0:
-        return False
-    if bg_frac is not None and bg_frac > 0.5:
-        return False
-    if sample_cov is not None and sample_cov == 0.0:
-        return False
-    if beam_source == "detector_center_fallback":
-        return False
-    return True
-
-
-def _quality_label(score: float | None) -> str:
-    if score is None:
-        return "not_scored"
-    if score >= 0.8:
-        return "high"
-    if score >= 0.5:
-        return "medium"
-    return "low"
 
 
 def _resolve_path(value: str | Path, base_dir: Path) -> Path:
@@ -230,9 +209,13 @@ def _resolve_path(value: str | Path, base_dir: Path) -> Path:
     return (base_dir / path).resolve()
 
 
-def _sha256_file(path: Path) -> str:
+def _sha256_file(path: Path) -> str | None:
     digest = hashlib.sha256()
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    try:
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError as exc:
+        log.warning("Could not hash candidate CIF %s: %s", path, exc)
+        return None

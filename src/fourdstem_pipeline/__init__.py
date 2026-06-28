@@ -1,7 +1,7 @@
 """Notebook-first 4D-STEM analysis helpers."""
 
 from .config import load_workflow_config, resolve_data_config, validate_workflow_config
-from .contracts import DataContract, Stage1Manifest, Stage1ManifestLoadError
+from .contracts import DataContract, Stage1Manifest, Stage1ManifestLoadError, is_roi_ready_for_indexing
 from .dataset import DatasetHandle
 from .fingerprints import FingerprintResult, compute_radial_fingerprints
 from .indexing import IndexingCandidate, ROIIndexingResult, run_stage2_indexing
@@ -40,6 +40,7 @@ __all__ = [
     "compute_virtual_images",
     "configure_pipeline_logging",
     "get_logger",
+    "is_roi_ready_for_indexing",
     "load_dataset",
     "load_roi_candidates",
     "load_stage1_manifest",

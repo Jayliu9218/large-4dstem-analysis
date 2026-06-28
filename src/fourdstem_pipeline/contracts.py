@@ -17,6 +17,31 @@ BBoxOrder = Literal["y0_y1_x0_x1"]
 CenterOrder = Literal["y_x"]
 
 
+def is_roi_ready_for_indexing(roi: dict[str, Any]) -> bool:
+    """Return True when a Stage 2A ROI can proceed to Stage 2B indexing.
+
+    This is the shared acceptance rule used by Stage 2A reports and the
+    Stage 2B indexing handoff. Keep it here so those surfaces cannot drift.
+    """
+    if roi.get("error"):
+        return False
+
+    n_peaks = roi.get("n_bragg_peaks", 0) or 0
+    bg_frac = roi.get("background_fraction")
+    sample_cov = roi.get("sample_mask_coverage")
+    beam_source = roi.get("beam_center_source", "")
+
+    if n_peaks <= 0:
+        return False
+    if bg_frac is not None and bg_frac > 0.5:
+        return False
+    if sample_cov is not None and sample_cov == 0.0:
+        return False
+    if beam_source == "detector_center_fallback":
+        return False
+    return True
+
+
 @dataclass
 class DataContract:
     """Coordinate conventions used throughout the pipeline.
