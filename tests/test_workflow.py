@@ -769,16 +769,21 @@ class WorkflowTests(unittest.TestCase):
 
         # Mock py4DSTEM to avoid needing the real package
         mock_py4dstem = MagicMock()
+        mock_cal = MagicMock()
+        mock_cal.get_qy0.return_value = 32.0
+        mock_cal.get_qx0.return_value = 32.0
         mock_py4dstem.import_file.return_value = MagicMock(
             data=np.zeros((16, 16, 64, 64), dtype=np.float32),
-            calibration=MagicMock(),
+            calibration=mock_cal,
         )
+        mock_py4dstem.__version__ = "0.14.0"
         mock_dc = MagicMock()
         mock_dc.bin_Q.return_value = mock_dc
         mock_dc.data = np.zeros((4, 4, 32, 32), dtype=np.float32)
         mock_bragg = MagicMock()
         mock_hist = MagicMock()
-        mock_hist.data = np.zeros((64, 64), dtype=np.float32)
+        # Non-zero Bragg vector map so n_peaks > 0
+        mock_hist.data = np.eye(64, dtype=np.float32)
         mock_bragg.histogram.return_value = mock_hist
         mock_dc.find_Bragg_disks.return_value = mock_bragg
         mock_py4dstem.DataCube.return_value = mock_dc
@@ -802,6 +807,18 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(len(result.roi_results), 1)
             self.assertIsNone(result.roi_results[0].error)
 
+            # Check new coordinate fields
+            r0 = result.roi_results[0]
+            self.assertEqual(len(r0.stage1_bbox), 4)
+            self.assertEqual(len(r0.raw_bbox), 4)
+            self.assertEqual(r0.raw_bbox[0], r0.stage1_bbox[0])  # r_bin=1 → identical
+            self.assertEqual(r0.raw_bbox[1], r0.stage1_bbox[1])
+            self.assertIsNotNone(r0.beam_center_yx)
+            self.assertEqual(len(r0.beam_center_yx), 2)
+            self.assertIsNotNone(r0.beam_center_source)
+            self.assertIsNotNone(r0.reason)
+            self.assertGreater(r0.n_peaks, 0)  # non-zero vmap
+
         # Check output structure
         s2_dir = self.output_dir / "stage2_mock"
         self.assertTrue((s2_dir / "stage2_summary.json").exists())
@@ -813,12 +830,291 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(summary["roi_results"]), 1)
         r = summary["roi_results"][0]
         self.assertIn("n_bragg_peaks", r)
+        self.assertIn("stage1_bbox", r)
+        self.assertIn("raw_bbox", r)
+        self.assertIn("beam_center_yx", r)
+        self.assertIn("beam_center_source", r)
         self.assertIn("bragg_vector_map_path", r)
+
+        # Check per-ROI bragg_summary.json
+        roi_dir = s2_dir / ("roi_" + r["name"])
+        self.assertTrue((roi_dir / "bragg_summary.json").exists())
+        bragg_summary = json.loads((roi_dir / "bragg_summary.json").read_text(encoding="utf-8"))
+        self.assertIn("stage1_bbox", bragg_summary)
+        self.assertIn("raw_bbox", bragg_summary)
+        self.assertIn("beam_center_yx", bragg_summary)
+        self.assertIn("beam_center_source", bragg_summary)
+        self.assertIn("cluster_validation", bragg_summary)
 
         qc = json.loads((s2_dir / "stage2_qc_summary.json").read_text(encoding="utf-8"))
         self.assertEqual(qc["n_rois_total"], 1)
         self.assertEqual(qc["n_rois_success"], 1)
         self.assertEqual(qc["n_rois_failed"], 0)
+
+
+    # ------------------------------------------------------------------
+    # Stage 2A correctness: coordinate mapping
+    # ------------------------------------------------------------------
+
+    def test_roi_bbox_converts_binned_to_raw(self):
+        """ROI bbox in binned coords converts correctly to raw scan coords."""
+        # Simulate what _process_one_roi does
+        bbox_binned = [10, 20, 30, 40]  # y0, y1, x0, x1
+        r_bin = 4
+        raw_bbox = [v * r_bin for v in bbox_binned]
+        self.assertEqual(raw_bbox, [40, 80, 120, 160])
+
+    def test_roi_bbox_rbin1_is_identity(self):
+        """With r_bin=1, binned and raw bbox should be identical."""
+        bbox_binned = [5, 15, 8, 24]
+        r_bin = 1
+        raw_bbox = [v * r_bin for v in bbox_binned]
+        self.assertEqual(raw_bbox, bbox_binned)
+
+    def test_roi_bbox_clamping(self):
+        """Bbox values are clamped to valid range before conversion."""
+        nav_shape_binned = (64, 64)
+        bbox = [-5, 70, -10, 80]  # out of bounds
+        by0, by1, bx0, bx1 = bbox
+        bny, bnx = nav_shape_binned
+        by0 = max(0, min(by0, bny))
+        by1 = max(by0 + 1, min(by1, bny))
+        bx0 = max(0, min(bx0, bnx))
+        bx1 = max(bx0 + 1, min(bx1, bnx))
+        self.assertEqual([by0, by1, bx0, bx1], [0, 64, 0, 64])
+
+    # ------------------------------------------------------------------
+    # Stage 2A correctness: Bragg parameter mapping
+    # ------------------------------------------------------------------
+
+    def test_bragg_params_snake_to_camel_mapping(self):
+        """Snake-case config params are mapped to py4DSTEM camelCase kwargs."""
+        from fourdstem_pipeline.roi_bragg import _convert_bragg_params
+
+        config_kwargs = {
+            "corr_power": 1.2,
+            "edge_boundary": 20,
+            "min_relative_intensity": 0.1,
+            "min_peak_spacing": 8,
+            "max_num_peaks": 100,
+            "cuda": True,
+        }
+        converted = _convert_bragg_params(config_kwargs)
+
+        self.assertEqual(converted["corrPower"], 1.2)
+        self.assertEqual(converted["edgeBoundary"], 20)
+        self.assertEqual(converted["minRelativeIntensity"], 0.1)
+        self.assertEqual(converted["minPeakSpacing"], 8)
+        self.assertEqual(converted["maxNumPeaks"], 100)
+        self.assertEqual(converted["CUDA"], True)
+
+    def test_bragg_params_defaults_filled(self):
+        """Unspecified params get sensible defaults."""
+        from fourdstem_pipeline.roi_bragg import _convert_bragg_params
+
+        converted = _convert_bragg_params({"corr_power": 1.5})
+        self.assertEqual(converted["corrPower"], 1.5)
+        self.assertEqual(converted["sigma_cc"], 1)
+        self.assertEqual(converted["edgeBoundary"], 10)
+        self.assertEqual(converted["subpixel"], "poly")
+
+    def test_bragg_params_already_camelcase_passthrough(self):
+        """Already-camelCase keys pass through unchanged."""
+        from fourdstem_pipeline.roi_bragg import _convert_bragg_params
+
+        converted = _convert_bragg_params({
+            "corrPower": 2.0,
+            "sigma_cc": 3,
+            "CUDA": True,
+        })
+        self.assertEqual(converted["corrPower"], 2.0)
+        self.assertEqual(converted["sigma_cc"], 3)
+        self.assertEqual(converted["CUDA"], True)
+
+    # ------------------------------------------------------------------
+    # Stage 2A correctness: beam centre
+    # ------------------------------------------------------------------
+
+    def test_parse_beam_center_txt(self):
+        """beam_center_estimate.txt is parsed correctly."""
+        from fourdstem_pipeline.roi_bragg import _parse_beam_center_txt
+
+        txt_path = self.output_dir / "beam_center_estimate.txt"
+        txt_path.write_text(
+            "estimated_center_yx: [31.523, 32.107]\n"
+            "radial_center_yx: [31.500, 31.500]\n"
+            "offset_pixels: 0.608\n",
+            encoding="utf-8",
+        )
+        result = _parse_beam_center_txt(txt_path)
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result[0], 31.523, places=3)
+        self.assertAlmostEqual(result[1], 32.107, places=3)
+
+    def test_parse_beam_center_txt_missing_file_returns_none(self):
+        """Nonexistent beam_center_estimate.txt returns None."""
+        from fourdstem_pipeline.roi_bragg import _parse_beam_center_txt
+
+        result = _parse_beam_center_txt(self.output_dir / "nonexistent.txt")
+        self.assertIsNone(result)
+
+    def test_parse_beam_center_txt_malformed_returns_none(self):
+        """Malformed beam_center_estimate.txt returns None."""
+        from fourdstem_pipeline.roi_bragg import _parse_beam_center_txt
+
+        txt_path = self.output_dir / "bad_beam_center.txt"
+        txt_path.write_text("garbage content\nno coordinates here\n", encoding="utf-8")
+        result = _parse_beam_center_txt(txt_path)
+        self.assertIsNone(result)
+
+    # ------------------------------------------------------------------
+    # Stage 2A correctness: cluster validation
+    # ------------------------------------------------------------------
+
+    def test_cluster_validation_background_fraction(self):
+        """Background fraction is computed correctly from labels."""
+        from fourdstem_pipeline.roi_bragg import _validate_roi_cluster_binned
+
+        # 10x10 labels with half background (-1)
+        labels = np.zeros((10, 10), dtype=np.int16)
+        labels[5:, :] = -1  # bottom half = background
+
+        result = _validate_roi_cluster_binned(
+            stage1_bbox=[0, 10, 0, 10],
+            y0=0, y1=10, x0=0, x1=10,
+            labels=labels,
+            sample_mask=None,
+            r_bin=1,
+        )
+        self.assertEqual(result["background_fraction"], 0.5)
+        self.assertTrue(result["labels_available"])
+
+    def test_cluster_validation_no_background(self):
+        """ROI entirely within sample has 0 background fraction."""
+        from fourdstem_pipeline.roi_bragg import _validate_roi_cluster_binned
+
+        labels = np.ones((8, 8), dtype=np.int16)  # all cluster 1, no -1
+        result = _validate_roi_cluster_binned(
+            stage1_bbox=[0, 4, 0, 4],
+            y0=0, y1=4, x0=0, x1=4,
+            labels=labels,
+            sample_mask=None,
+            r_bin=1,
+        )
+        self.assertEqual(result["background_fraction"], 0.0)
+        self.assertIsNone(result["warning"])
+
+    def test_cluster_validation_high_background_warns(self):
+        """ROI with >50% background produces a warning."""
+        from fourdstem_pipeline.roi_bragg import _validate_roi_cluster_binned
+
+        labels = np.full((8, 8), -1, dtype=np.int16)
+        labels[:2, :] = 0  # only 2 rows non-background
+        result = _validate_roi_cluster_binned(
+            stage1_bbox=[0, 8, 0, 8],
+            y0=0, y1=8, x0=0, x1=8,
+            labels=labels,
+            sample_mask=None,
+            r_bin=1,
+        )
+        self.assertAlmostEqual(result["background_fraction"], 0.75, places=2)
+        self.assertIsNotNone(result["warning"])
+        self.assertIn("75", result["warning"])  # percentage mention
+
+    def test_cluster_validation_sample_mask_coverage(self):
+        """Sample mask coverage is computed correctly."""
+        from fourdstem_pipeline.roi_bragg import _validate_roi_cluster_binned
+
+        sample_mask = np.zeros((8, 8), dtype=bool)
+        sample_mask[:4, :] = True  # top half = sample
+
+        result = _validate_roi_cluster_binned(
+            stage1_bbox=[0, 8, 0, 8],
+            y0=0, y1=8, x0=0, x1=8,
+            labels=None,
+            sample_mask=sample_mask,
+            r_bin=1,
+        )
+        self.assertEqual(result["sample_mask_coverage"], 0.5)
+
+    def test_cluster_validation_zero_coverage_warns(self):
+        """ROI with 0% sample coverage produces a warning."""
+        from fourdstem_pipeline.roi_bragg import _validate_roi_cluster_binned
+
+        sample_mask = np.zeros((8, 8), dtype=bool)  # all background
+        result = _validate_roi_cluster_binned(
+            stage1_bbox=[0, 4, 0, 4],
+            y0=0, y1=4, x0=0, x1=4,
+            labels=None,
+            sample_mask=sample_mask,
+            r_bin=1,
+        )
+        self.assertEqual(result["sample_mask_coverage"], 0.0)
+        self.assertIsNotNone(result["warning"])
+        self.assertIn("0%", result["warning"])
+
+    # ------------------------------------------------------------------
+    # Stage 2A: real-data smoke test (guarded by env var)
+    # ------------------------------------------------------------------
+
+    def test_stage2_real_data_smoke(self):
+        """Optional: run one ROI against real data if FOURDSTEM_REAL_DATA=1."""
+        import os
+        if os.environ.get("FOURDSTEM_REAL_DATA") != "1":
+            self.skipTest("Set FOURDSTEM_REAL_DATA=1 to run real-data smoke test.")
+
+        import yaml
+        from fourdstem_pipeline.stage2 import run_stage2
+        from pathlib import Path
+
+        # Use the default config but cap to 1 ROI
+        config_path = Path(__file__).resolve().parents[1] / "configs" / "stage2_roi_bragg.yaml"
+        if not config_path.exists():
+            self.skipTest(f"Config not found: {config_path}")
+
+        stage2_cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        stage2_cfg["max_rois"] = 1
+
+        result = run_stage2(stage2_cfg)
+
+        # Acceptance criteria
+        self.assertGreater(len(result.roi_results), 0, "No ROIs processed.")
+        r = result.roi_results[0]
+        self.assertIsNone(r.error, f"ROI failed: {r.error}")
+
+        # Coordinate correctness
+        self.assertEqual(len(r.stage1_bbox), 4, "stage1_bbox missing/invalid")
+        self.assertEqual(len(r.raw_bbox), 4, "raw_bbox missing/invalid")
+        # raw_bbox should be r_bin * stage1_bbox
+        r_bin = result.manifest.r_bin
+        for i in range(4):
+            self.assertEqual(
+                r.raw_bbox[i], r.stage1_bbox[i] * r_bin,
+                f"raw_bbox[{i}]={r.raw_bbox[i]} != stage1_bbox[{i}]={r.stage1_bbox[i]} * r_bin={r_bin}"
+            )
+
+        # Beam centre recorded
+        self.assertIsNotNone(r.beam_center_yx, "beam_center_yx not recorded")
+        self.assertIsNotNone(r.beam_center_source, "beam_center_source not recorded")
+        self.assertIn(
+            r.beam_center_source,
+            ("stage1_com", "py4dstem_calibration", "detector_center_fallback"),
+        )
+
+        # Output files exist
+        self.assertTrue(r.bragg_summary_path.exists(), "bragg_summary.json missing")
+        self.assertTrue(r.bragg_vector_map_path.exists(), "bragg_vector_map.npy missing")
+
+        # bragg_summary.json has required fields
+        import json
+        bragg_summary = json.loads(r.bragg_summary_path.read_text(encoding="utf-8"))
+        for field in ("stage1_bbox", "raw_bbox", "beam_center_yx",
+                       "beam_center_source", "n_bragg_peaks", "dependencies"):
+            self.assertIn(field, bragg_summary, f"bragg_summary.json missing '{field}'")
+
+        # Verify scan shape was recorded
+        self.assertIn("scan_shape", bragg_summary["dependencies"])
+        self.assertIn("py4dstem_version", bragg_summary["dependencies"])
 
 
 if __name__ == "__main__":

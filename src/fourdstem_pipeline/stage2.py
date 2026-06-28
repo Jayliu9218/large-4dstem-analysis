@@ -12,13 +12,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 
 from .config import load_workflow_config
 from .contracts import Stage1Manifest, Stage1ManifestLoadError
 from .logging import configure_pipeline_logging, get_logger
 from .provenance import collect_provenance, save_provenance
-from .roi_bragg import ROIBraggResult, Stage2Result, load_roi_candidates, run_roi_bragg_for_rois
+from .roi_bragg import (
+    ROIBraggResult,
+    Stage2Result,
+    _parse_beam_center_txt,
+    load_roi_candidates,
+    run_roi_bragg_for_rois,
+)
 
 log = get_logger(__name__)
 
@@ -80,8 +87,9 @@ def run_stage2(config: str | Path | dict[str, Any]) -> Stage2Result:
         for w in manifest.warnings:
             log.warning("Stage-1 manifest warning: %s", w)
     log.info(
-        "Manifest loaded: run=%s, nav=%s, sig=%s, qc=%s",
-        manifest.run_name, manifest.nav_shape, manifest.sig_shape, manifest.qc_status,
+        "Manifest loaded: run=%s, nav=%s, sig=%s, r_bin=%d, qc=%s",
+        manifest.run_name, manifest.nav_shape, manifest.sig_shape,
+        manifest.r_bin, manifest.qc_status,
     )
 
     # --- Load ROI candidates ------------------------------------------------
@@ -101,6 +109,52 @@ def run_stage2(config: str | Path | dict[str, Any]) -> Stage2Result:
 
     # --- Resolve data path --------------------------------------------------
     data_path = _resolve_data_path(cfg, manifest)
+
+    # --- Load beam centre from Stage 1 --------------------------------------
+    beam_center_yx: tuple[float, float] | None = None
+    beam_center_txt = stage1_dir / "00_preprocess" / "beam_center_estimate.txt"
+    if beam_center_txt.exists():
+        parsed = _parse_beam_center_txt(beam_center_txt)
+        if parsed is not None:
+            beam_center_yx = parsed
+            log.info(
+                "Stage-1 beam centre loaded from %s: (%.3f, %.3f)",
+                beam_center_txt, *beam_center_yx,
+            )
+        else:
+            log.warning(
+                "Found %s but could not parse beam centre coordinates.",
+                beam_center_txt,
+            )
+    else:
+        log.info(
+            "No Stage-1 beam centre estimate at %s; will fall back to "
+            "py4DSTEM calibration or detector centre.",
+            beam_center_txt,
+        )
+
+    # --- Load labels for cluster validation ---------------------------------
+    labels: np.ndarray | None = None
+    if manifest.labels_path.exists():
+        try:
+            labels = np.load(manifest.labels_path)
+            log.info("Labels loaded: shape=%s, background=%d pixels",
+                     labels.shape, int(np.sum(labels == -1)))
+        except Exception as exc:
+            log.warning("Failed to load labels from %s: %s", manifest.labels_path, exc)
+
+    # --- Load sample mask for coverage validation ---------------------------
+    sample_mask: np.ndarray | None = None
+    sample_mask_npy = stage1_dir / "00_preprocess" / "sample_mask.npy"
+    if sample_mask_npy.exists():
+        try:
+            sample_mask = np.load(sample_mask_npy)
+            log.info("Sample mask loaded: shape=%s, coverage=%.1f%%",
+                     sample_mask.shape, 100.0 * float(sample_mask.mean()))
+        except Exception as exc:
+            log.warning("Failed to load sample mask from %s: %s", sample_mask_npy, exc)
+    else:
+        log.info("No sample mask at %s; skipping coverage validation.", sample_mask_npy)
 
     # --- Run ROI Bragg detection --------------------------------------------
     bragg_kwargs: dict[str, Any] = {}
@@ -122,6 +176,9 @@ def run_stage2(config: str | Path | dict[str, Any]) -> Stage2Result:
         bin_q=int(cfg.get("bin_q", 2)),
         mem=cfg.get("mem", "MEMMAP"),
         bragg_kwargs=bragg_kwargs,
+        beam_center_yx=beam_center_yx,
+        labels=labels,
+        sample_mask=sample_mask,
     )
 
     # --- Collect provenance -------------------------------------------------
@@ -142,7 +199,7 @@ def run_stage2(config: str | Path | dict[str, Any]) -> Stage2Result:
         roi_results=roi_results,
     )
 
-    summary = _build_stage2_summary(result, provenance, cfg)
+    summary = _build_stage2_summary(result, provenance, cfg, beam_center_yx)
     summary_path = output_dir / "stage2_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
     log.info("Stage 2 summary written to %s", summary_path)
@@ -163,6 +220,11 @@ def run_stage2(config: str | Path | dict[str, Any]) -> Stage2Result:
             "Stage 2A finished successfully: %d ROIs, %d total Bragg peaks in %.1f s",
             result.n_success, sum(r.n_peaks for r in roi_results), elapsed,
         )
+
+    # Emit cluster validation warnings to the log
+    for r in roi_results:
+        if r.error is None and r.cluster_validation_warning:
+            log.warning("ROI '%s' cluster validation: %s", r.name, r.cluster_validation_warning)
 
     return result
 
@@ -221,8 +283,33 @@ def _build_stage2_summary(
     result: Stage2Result,
     provenance: dict[str, Any],
     cfg: dict[str, Any],
+    beam_center_yx: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """Build the stage2_summary.json dict."""
+    data_path_str = str(_resolve_data_path(cfg, result.manifest))
+
+    roi_summaries: list[dict[str, Any]] = []
+    for r in result.roi_results:
+        roi_summaries.append({
+            "name": r.name,
+            "stage1_bbox": r.stage1_bbox,
+            "raw_bbox": r.raw_bbox,
+            "nav_shape": list(r.nav_shape),
+            "sig_shape": list(r.sig_shape),
+            "n_bragg_peaks": r.n_peaks,
+            "beam_center_yx": r.beam_center_yx,
+            "beam_center_source": r.beam_center_source,
+            "cluster_id": r.cluster_id,
+            "reason": r.reason,
+            "background_fraction": r.background_fraction,
+            "sample_mask_coverage": r.sample_mask_coverage,
+            "cluster_validation_warning": r.cluster_validation_warning,
+            "roi_data_path": str(r.roi_data_path) if r.roi_data_path else None,
+            "bragg_vector_map_path": str(r.bragg_vector_map_path) if r.bragg_vector_map_path else None,
+            "bragg_summary_path": str(r.bragg_summary_path) if r.bragg_summary_path else None,
+            "error": r.error,
+        })
+
     return {
         "stage1_dir": str(result.stage1_dir),
         "output_dir": str(result.output_dir),
@@ -231,6 +318,7 @@ def _build_stage2_summary(
             "run_name": result.manifest.run_name,
             "nav_shape": result.manifest.nav_shape,
             "sig_shape": result.manifest.sig_shape,
+            "r_bin": result.manifest.r_bin,
             "qc_status": result.manifest.qc_status,
         },
         "parameters": {
@@ -239,24 +327,18 @@ def _build_stage2_summary(
             "max_rois": cfg.get("max_rois"),
             "roi_source": cfg.get("roi_source", "roi_candidates"),
         },
-        "roi_results": [
-            {
-                "name": r.name,
-                "roi_bbox": r.roi_bbox,
-                "nav_shape": list(r.nav_shape),
-                "sig_shape": list(r.sig_shape),
-                "n_bragg_peaks": r.n_peaks,
-                "roi_data_path": str(r.roi_data_path) if r.roi_data_path else None,
-                "bragg_vector_map_path": str(r.bragg_vector_map_path) if r.bragg_vector_map_path else None,
-                "bragg_summary_path": str(r.bragg_summary_path) if r.bragg_summary_path else None,
-                "error": r.error,
-            }
-            for r in result.roi_results
-        ],
+        "beam_center": {
+            "stage1_yx": list(beam_center_yx) if beam_center_yx else None,
+            "source": (
+                result.roi_results[0].beam_center_source
+                if result.roi_results else None
+            ),
+        },
+        "roi_results": roi_summaries,
         "provenance": provenance,
         "dependencies": {
             "py4DSTEM_used": True,
-            "data_path": str(_resolve_data_path(cfg, result.manifest)),
+            "data_path": data_path_str,
         },
         "errors": result.errors if result.errors else None,
     }
@@ -292,6 +374,72 @@ def _build_stage2_qc(result: Stage2Result) -> dict[str, Any]:
                 "code": "NO_BRAGG_PEAKS",
                 "message": "No Bragg peaks found in any ROI. Check Bragg detection parameters.",
             })
+
+    # --- Cluster validation warnings ----------------------------------------
+    cluster_warnings = [
+        r for r in result.roi_results
+        if r.error is None and r.cluster_validation_warning is not None
+    ]
+    if cluster_warnings:
+        flags.append({
+            "severity": "warning",
+            "code": "CLUSTER_VALIDATION_WARNINGS",
+            "message": f"{len(cluster_warnings)} ROI(s) have cluster/background validation warnings.",
+            "evidence": {
+                "warned_rois": [
+                    {
+                        "name": r.name,
+                        "background_fraction": r.background_fraction,
+                        "sample_mask_coverage": r.sample_mask_coverage,
+                        "warning": r.cluster_validation_warning,
+                    }
+                    for r in cluster_warnings
+                ],
+            },
+        })
+
+    # --- High-background ROIs (critical) ------------------------------------
+    high_bg_rois = [
+        r for r in result.roi_results
+        if r.error is None
+        and r.background_fraction is not None
+        and r.background_fraction > 0.5
+    ]
+    if high_bg_rois:
+        flags.append({
+            "severity": "critical",
+            "code": "HIGH_BACKGROUND_ROIS",
+            "message": (
+                f"{len(high_bg_rois)} ROI(s) have >50% background pixels "
+                f"(label -1). These ROIs may be over vacuum/sample edge."
+            ),
+            "evidence": {
+                "high_background_rois": [
+                    {"name": r.name, "background_fraction": r.background_fraction}
+                    for r in high_bg_rois
+                ],
+            },
+        })
+
+    # --- Zero-coverage ROIs (critical) --------------------------------------
+    zero_cov_rois = [
+        r for r in result.roi_results
+        if r.error is None
+        and r.sample_mask_coverage is not None
+        and r.sample_mask_coverage == 0.0
+    ]
+    if zero_cov_rois:
+        flags.append({
+            "severity": "critical",
+            "code": "ZERO_SAMPLE_COVERAGE_ROIS",
+            "message": (
+                f"{len(zero_cov_rois)} ROI(s) have 0% sample mask coverage. "
+                f"These ROIs are entirely outside the sample region."
+            ),
+            "evidence": {
+                "zero_coverage_rois": [r.name for r in zero_cov_rois],
+            },
+        })
 
     n_critical = sum(1 for f in flags if f.get("severity") == "critical")
     n_warnings = sum(1 for f in flags if f.get("severity") == "warning")

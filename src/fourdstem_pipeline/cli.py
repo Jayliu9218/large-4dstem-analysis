@@ -79,9 +79,9 @@ def dry_run() -> None:
             out_path.write_text(
                 json.dumps(_jsonable(result), indent=2, default=str), encoding="utf-8",
             )
-            print(f"\nDry-run summary saved to {out_path}")
+            print(f"\nDry-run summary saved to {out_path}\n")
         except OSError as exc:
-            print(f"\nCould not save dry-run summary: {exc}", file=sys.stderr)
+            print(f"\nCould not save dry-run summary: {exc}\n", file=sys.stderr)
 
     # Exit code
     if result["status"] == "FAIL":
@@ -130,7 +130,7 @@ def stage2() -> None:
                 print(f"    - {r.name}: {r.error}", file=sys.stderr)
         sys.exit(1)
     else:
-        print(f"  Output: {result.output_dir}")
+        print(f"  Output: {result.output_dir}\n")
 
 
 # ---------------------------------------------------------------------------

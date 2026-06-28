@@ -1,0 +1,36 @@
+# Stage 2A: Smoke Test Configuration (max_rois: 1)
+# ====================================================
+# Minimal configuration that processes exactly one ROI for quick
+# validation of coordinate mapping, parameter plumbing, and output
+# structure.  Intended for use before running a full Stage 2A.
+#
+# Usage:
+#   fourdstem-stage2 --config configs/stage2_smoke_test.yaml
+#
+# For CI / automated validation, set the env var:
+#   FOURDSTEM_REAL_DATA=1 python -m pytest tests/test_workflow.py \
+#       -k test_stage2_real_data_smoke -v
+
+stage1_dir: outputs/0617_4d_stage1
+
+# Override output_dir so smoke runs don't clobber production outputs.
+output_dir: null  # defaults to <stage1_dir>/stage2/roi_bragg/
+
+roi_source: roi_candidates
+
+# Process only ONE ROI for smoke testing.
+max_rois: 1
+
+thin_r: 2
+bin_q: 2
+mem: MEMMAP
+
+# Bragg detection parameters (snake_case — mapped to py4DSTEM camelCase internally).
+corr_power: 1.0
+sigma_cc: 1
+edge_boundary: 10
+min_relative_intensity: 0.05
+min_peak_spacing: 4
+subpixel: poly
+max_num_peaks: 70
+cuda: false
