@@ -68,7 +68,7 @@ def run_stage2(config: str | Path | dict[str, Any]) -> Stage2Result:
         cfg = config
 
     stage1_dir = Path(cfg["stage1_dir"]).resolve()
-    output_dir = Path(cfg.get("output_dir", stage1_dir / "stage2" / "roi_bragg")).resolve()
+    output_dir = Path(cfg.get("output_dir") or stage1_dir / "stage2" / "roi_bragg").resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     log.info("Stage 2A starting: stage1_dir=%s, output_dir=%s", stage1_dir, output_dir)
