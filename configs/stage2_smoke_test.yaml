@@ -25,7 +25,11 @@ thin_r: 2
 bin_q: 2
 mem: MEMMAP
 
-# Bragg detection parameters (snake_case — mapped to py4DSTEM camelCase internally).
+# Optional raw navigation shape [ny, nx] passed to py4DSTEM.import_file.
+# Leave null to infer scan_shape as stage1 nav_shape * r_bin.
+scan_shape: null
+
+# Bragg detection parameters (snake_case mapped to py4DSTEM camelCase internally).
 corr_power: 1.0
 sigma_cc: 1
 edge_boundary: 10

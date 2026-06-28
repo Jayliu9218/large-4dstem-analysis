@@ -31,6 +31,12 @@ bin_q: 2     # Detector binning factor
 # py4DSTEM memory mode: "MEMMAP" (recommended for large files) or "RAM".
 mem: MEMMAP
 
+# Optional raw navigation shape [ny, nx] passed to py4DSTEM.import_file.
+# Leave null to infer scan_shape as stage1 nav_shape * r_bin.
+# Set this explicitly if the detector/scan shape reported by py4DSTEM does
+# not match the inferred value.
+scan_shape: null
+
 # -- py4DSTEM Bragg-disk detection parameters --
 corr_power: 1.0
 sigma_cc: 1

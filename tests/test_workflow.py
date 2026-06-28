@@ -797,6 +797,7 @@ class WorkflowTests(unittest.TestCase):
                 "max_rois": 1,
                 "thin_r": 2,
                 "bin_q": 2,
+                "scan_shape": [16, 16],
                 "data_path": str(self.output_dir / "dummy.mib"),
             }
             # Create a dummy data file so path resolution works
@@ -818,6 +819,11 @@ class WorkflowTests(unittest.TestCase):
             self.assertIsNotNone(r0.beam_center_source)
             self.assertIsNotNone(r0.reason)
             self.assertGreater(r0.n_peaks, 0)  # non-zero vmap
+            mock_py4dstem.import_file.assert_called_once_with(
+                str(self.output_dir / "dummy.mib"),
+                mem="MEMMAP",
+                scan=(16, 16),
+            )
 
         # Check output structure
         s2_dir = self.output_dir / "stage2_mock"
@@ -845,11 +851,127 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("beam_center_yx", bragg_summary)
         self.assertIn("beam_center_source", bragg_summary)
         self.assertIn("cluster_validation", bragg_summary)
+        self.assertEqual(bragg_summary["dependencies"]["scan_shape"], [16, 16])
 
         qc = json.loads((s2_dir / "stage2_qc_summary.json").read_text(encoding="utf-8"))
         self.assertEqual(qc["n_rois_total"], 1)
         self.assertEqual(qc["n_rois_success"], 1)
         self.assertEqual(qc["n_rois_failed"], 0)
+
+        self.assertEqual(summary["parameters"]["scan_shape"], [16, 16])
+        self.assertEqual(summary["dependencies"]["scan_shape"], [16, 16])
+
+    def test_stage2_report_uses_ascii_verdicts(self):
+        """Stage 2A reports use ASCII-safe production labels."""
+        from fourdstem_pipeline.export_stage2 import save_stage2_report
+
+        summary = {
+            "run_name": "ascii_report",
+            "output_dir": str(self.output_dir),
+            "manifest": {"run_name": "s1", "nav_shape": [4, 4], "sig_shape": [8, 8], "r_bin": 1, "qc_status": "PASS"},
+            "parameters": {"thin_r": 1, "bin_q": 1, "max_rois": 3, "roi_source": "roi_candidates"},
+            "beam_center": {"stage1_yx": [4.0, 4.0], "source": "stage1_com"},
+            "dependencies": {"data_path": "data.mib"},
+            "provenance": {"packages": {}, "pipeline_version": "test"},
+            "roi_results": [
+                {
+                    "name": "ready",
+                    "cluster_id": 1,
+                    "reason": "largest_cluster",
+                    "stage1_bbox": [0, 2, 0, 2],
+                    "raw_bbox": [0, 2, 0, 2],
+                    "nav_shape": [2, 2],
+                    "sig_shape": [8, 8],
+                    "n_bragg_peaks": 6,
+                    "beam_center_source": "stage1_com",
+                    "background_fraction": 0.0,
+                    "sample_mask_coverage": 1.0,
+                    "error": None,
+                },
+                {
+                    "name": "review",
+                    "cluster_id": 2,
+                    "reason": "warning",
+                    "stage1_bbox": [0, 2, 2, 4],
+                    "raw_bbox": [0, 2, 2, 4],
+                    "nav_shape": [2, 2],
+                    "sig_shape": [8, 8],
+                    "n_bragg_peaks": 3,
+                    "beam_center_source": "detector_center_fallback",
+                    "background_fraction": 0.0,
+                    "sample_mask_coverage": 1.0,
+                    "error": None,
+                },
+                {"name": "failed", "error": "boom"},
+            ],
+        }
+
+        md_path, html_path = save_stage2_report(self.output_dir, summary)
+        md = md_path.read_text(encoding="utf-8")
+        html = html_path.read_text(encoding="utf-8")
+
+        self.assertIn("[READY] Ready", md)
+        self.assertIn("[REVIEW] Review", md)
+        self.assertIn("[FAIL] boom", md)
+        for text in (md, html):
+            self.assertTrue(all(ord(ch) < 128 for ch in text))
+
+    def test_stage2b_indexing_contract_with_mock_candidates(self):
+        """Stage 2B scaffold consumes accepted Stage 2A ROIs and CIF metadata."""
+        from fourdstem_pipeline.indexing import run_stage2_indexing
+
+        stage2_dir = self.output_dir / "stage2a"
+        stage2_dir.mkdir()
+        cif_path = self.output_dir / "candidate.cif"
+        cif_path.write_text("data_candidate\n_cell_length_a 1.0\n", encoding="utf-8")
+        (stage2_dir / "stage2_summary.json").write_text(
+            json.dumps({
+                "run_name": "mock_stage2a",
+                "roi_results": [
+                    {
+                        "name": "roi_good",
+                        "error": None,
+                        "n_bragg_peaks": 4,
+                        "background_fraction": 0.0,
+                        "sample_mask_coverage": 1.0,
+                        "beam_center_source": "stage1_com",
+                        "bragg_summary_path": str(stage2_dir / "roi_good" / "bragg_summary.json"),
+                    },
+                    {
+                        "name": "roi_skip",
+                        "error": None,
+                        "n_bragg_peaks": 0,
+                        "background_fraction": 0.0,
+                        "sample_mask_coverage": 1.0,
+                        "beam_center_source": "stage1_com",
+                    },
+                ],
+            }),
+            encoding="utf-8",
+        )
+
+        output_dir = self.output_dir / "stage2b"
+        summary = run_stage2_indexing({
+            "stage2_dir": str(stage2_dir),
+            "output_dir": str(output_dir),
+            "candidate_cifs": [
+                {
+                    "name": "candidate",
+                    "phase": "mock_phase",
+                    "path": str(cif_path),
+                    "reference_peaks": [1, 2, 3, 4],
+                }
+            ],
+        })
+
+        self.assertTrue((output_dir / "stage2_indexing_summary.json").exists())
+        self.assertEqual(summary["status"], "READY_FOR_TEMPLATE_MATCHING")
+        self.assertEqual(summary["accepted_roi_count"], 1)
+        self.assertEqual(summary["candidate_cifs"][0]["phase"], "mock_phase")
+        self.assertIsNotNone(summary["candidate_cifs"][0]["sha256"])
+        self.assertEqual(summary["roi_results"][0]["name"], "roi_good")
+        self.assertEqual(summary["roi_results"][0]["best_candidate"], "candidate")
+        self.assertEqual(summary["roi_results"][0]["phase_score"], 1.0)
 
 
     # ------------------------------------------------------------------

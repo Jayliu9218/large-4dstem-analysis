@@ -4,6 +4,7 @@ from .config import load_workflow_config, resolve_data_config, validate_workflow
 from .contracts import DataContract, Stage1Manifest, Stage1ManifestLoadError
 from .dataset import DatasetHandle
 from .fingerprints import FingerprintResult, compute_radial_fingerprints
+from .indexing import IndexingCandidate, ROIIndexingResult, run_stage2_indexing
 from .loaders import load_dataset
 from .logging import configure_pipeline_logging, get_logger
 from .masks import build_annular_masks
@@ -21,11 +22,13 @@ __all__ = [
     "DataContract",
     "DatasetHandle",
     "FingerprintResult",
+    "IndexingCandidate",
     "OrientationResult",
     "PhaseScreeningResult",
     "PreprocessedArray",
     "PreprocessSpec",
     "ROIBraggResult",
+    "ROIIndexingResult",
     "Stage1Manifest",
     "Stage1ManifestLoadError",
     "Stage2Result",
@@ -47,6 +50,7 @@ __all__ = [
     "run_roi_bragg_for_rois",
     "run_stage1_diagnostics",
     "run_stage2",
+    "run_stage2_indexing",
     "run_workflow",
     "screen_phases",
     "validate_workflow_config",

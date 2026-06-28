@@ -34,7 +34,7 @@ log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Configuration → py4DSTEM parameter mapping
+# Configuration to py4DSTEM parameter mapping
 # ---------------------------------------------------------------------------
 
 # Map snake_case config keys (used in YAML) to the camelCase argument names
@@ -76,7 +76,7 @@ def _convert_bragg_params(config_kwargs: dict[str, Any]) -> dict[str, Any]:
     for key, value in config_kwargs.items():
         mapped = _BRAGG_CONFIG_TO_PY4DSTEM.get(key, key)
         if mapped != key:
-            log.debug("Bragg param: %s → %s = %s", key, mapped, value)
+            log.debug("Bragg param: %s -> %s = %s", key, mapped, value)
         elif mapped not in _DEFAULT_BRAGG_PARAMS and mapped not in (
             "corrPower", "sigma_cc", "edgeBoundary", "minRelativeIntensity",
             "minPeakSpacing", "subpixel", "maxNumPeaks", "CUDA",
@@ -261,7 +261,7 @@ class ROIBraggResult:
         coordinates (as recorded in ``roi_candidates.yaml``).
     raw_bbox:
         Bounding box ``[y0, y1, x0, x1]`` in **original** (raw) scan
-        coordinates — what was actually sliced from the py4DSTEM cube.
+        coordinates - what was actually sliced from the py4DSTEM cube.
     nav_shape:
         Navigation shape ``(ny, nx)`` of the extracted ROI after thinning.
     sig_shape:
@@ -374,6 +374,7 @@ def run_roi_bragg_for_rois(
     bin_q: int = 2,
     mem: str = "MEMMAP",
     bragg_kwargs: dict[str, Any] | None = None,
+    scan_shape: tuple[int, int] | list[int] | None = None,
     beam_center_yx: tuple[float, float] | None = None,
     labels: np.ndarray | None = None,
     sample_mask: np.ndarray | None = None,
@@ -403,6 +404,10 @@ def run_roi_bragg_for_rois(
     bragg_kwargs:
         Keyword arguments in **snake_case** config form (e.g. ``corr_power``).
         These are converted to py4DSTEM camelCase internally.
+    scan_shape:
+        Optional original/raw navigation shape ``(ny, nx)`` to pass to
+        ``py4DSTEM.import_file``. If omitted, this is inferred as
+        ``manifest.nav_shape * manifest.r_bin``.
     beam_center_yx:
         Beam centre ``(qy, qx)`` from Stage 1 COM estimate.  If ``None``,
         falls back to py4DSTEM calibration, then detector centre.
@@ -425,7 +430,7 @@ def run_roi_bragg_for_rois(
             "Install with: pip install py4DSTEM>=0.14"
         ) from exc
 
-    # --- Convert Bragg params from config snake_case → py4DSTEM camelCase ---
+    # --- Convert Bragg params from config snake_case to py4DSTEM camelCase ---
     if bragg_kwargs is None:
         bragg_kwargs = {}
     bragg_kwargs_converted = _convert_bragg_params(bragg_kwargs)
@@ -439,31 +444,37 @@ def run_roi_bragg_for_rois(
 
     r_bin = max(1, int(manifest.r_bin))
 
-    # Compute the original (pre-binned) scan shape.  manifest.nav_shape is
-    # *after* Stage-1 r_bin reduction, so we multiply back up.  This is
-    # correct when r_bin divides evenly; when it doesn't the original
-    # scan_shape should be provided explicitly via the parameter.
-    scan_shape: tuple[int, int] = (
-        manifest.nav_shape[0] * r_bin,
-        manifest.nav_shape[1] * r_bin,
-    )
+    # Compute the original (pre-binned) scan shape. manifest.nav_shape is
+    # after Stage-1 r_bin reduction, so multiplying back up is the default.
+    # Explicit scan_shape handles detector/scan mismatches or non-even r_bin.
+    if scan_shape is None:
+        scan_shape_tuple: tuple[int, int] = (
+            manifest.nav_shape[0] * r_bin,
+            manifest.nav_shape[1] * r_bin,
+        )
+    else:
+        if len(scan_shape) != 2:
+            raise ValueError("scan_shape must contain exactly two values: [ny, nx].")
+        scan_shape_tuple = (int(scan_shape[0]), int(scan_shape[1]))
+        if scan_shape_tuple[0] <= 0 or scan_shape_tuple[1] <= 0:
+            raise ValueError(f"scan_shape values must be positive, got {scan_shape_tuple}.")
 
     # --- Record py4DSTEM metadata -------------------------------------------
     py4dstem_version: str = getattr(py4DSTEM, "__version__", "unknown")
     log.info("py4DSTEM version: %s", py4dstem_version)
     log.info(
         "Loading 4D-STEM data from %s (mem=%s, scan=%s, r_bin=%d)",
-        data_path, mem, scan_shape, r_bin,
+        data_path, mem, scan_shape_tuple, r_bin,
     )
     cube = py4DSTEM.import_file(
         str(data_path),
         mem=mem,
-        scan=scan_shape,
+        scan=scan_shape_tuple,
     )
 
     # --- Verify import shape -------------------------------------------------
     actual_shape = tuple(int(v) for v in cube.data.shape)
-    expected_nav = scan_shape
+    expected_nav = scan_shape_tuple
     if actual_shape[:2] != expected_nav:
         log.warning(
             "Imported cube shape %s nav does not match expected %s. "
@@ -520,12 +531,12 @@ def run_roi_bragg_for_rois(
                 labels=labels,
                 sample_mask=sample_mask,
                 py4dstem_version=py4dstem_version,
-                scan_shape=scan_shape,
+                scan_shape=scan_shape_tuple,
                 data_path_str=str(data_path),
             )
             results.append(result)
             log.info(
-                "ROI '%s' complete: %d Bragg peaks found → %s",
+                "ROI '%s' complete: %d Bragg peaks found -> %s",
                 name, result.n_peaks, roi_dir,
             )
         except Exception as exc:
@@ -617,7 +628,7 @@ def _process_one_roi(
     cluster_id = roi.get("cluster")
     reason = roi.get("reason")
 
-    # --- Coordinate conversion: binned → raw --------------------------------
+    # --- Coordinate conversion: binned to raw --------------------------------
     # Stage 1 bbox is in binned navigation coordinates (after r_bin).
     # The py4DSTEM cube is in original scan coordinates.
     # We must convert the bbox to raw coordinates before slicing.
@@ -648,7 +659,7 @@ def _process_one_roi(
     raw_bbox = [ry0, ry1, rx0, rx1]
 
     log.info(
-        "ROI '%s': stage1_bbox=%s → raw_bbox=%s (r_bin=%d)",
+        "ROI '%s': stage1_bbox=%s -> raw_bbox=%s (r_bin=%d)",
         name, stage1_bbox_clamped, raw_bbox, r_bin,
     )
 

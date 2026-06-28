@@ -1,0 +1,19 @@
+# Stage 2B: Phase / Orientation Indexing Contract
+# =================================================
+# Consumes accepted Stage 2A ROI Bragg outputs. This config is for the
+# indexing scaffold; full template generation and orientation search are
+# intentionally added after real-data Stage 2A acceptance.
+
+# Stage 2A output directory containing stage2_summary.json.
+stage2_dir: outputs/0617_4d_stage1/stage2/roi_bragg
+
+# Optional output directory. Defaults to <stage2_dir>/stage2b_indexing/.
+output_dir: null
+
+# Candidate CIFs for the next indexing implementation.
+# reference_peaks is optional and exists only for mocked contract tests.
+candidate_cifs:
+  # - name: candidate_phase
+  #   phase: unknown
+  #   path: data/cifs/candidate_phase.cif
+  #   reference_peaks: []

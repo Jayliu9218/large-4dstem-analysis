@@ -110,6 +110,7 @@ def run_stage2(config: str | Path | dict[str, Any]) -> Stage2Result:
 
     # --- Resolve data path --------------------------------------------------
     data_path = _resolve_data_path(cfg, manifest)
+    scan_shape = _parse_scan_shape(cfg.get("scan_shape"))
 
     # --- Load beam centre from Stage 1 --------------------------------------
     beam_center_yx: tuple[float, float] | None = None
@@ -177,6 +178,7 @@ def run_stage2(config: str | Path | dict[str, Any]) -> Stage2Result:
         bin_q=int(cfg.get("bin_q", 2)),
         mem=cfg.get("mem", "MEMMAP"),
         bragg_kwargs=bragg_kwargs,
+        scan_shape=scan_shape,
         beam_center_yx=beam_center_yx,
         labels=labels,
         sample_mask=sample_mask,
@@ -301,6 +303,18 @@ def _resolve_data_path(cfg: dict[str, Any], manifest: Stage1Manifest) -> Path:
     )
 
 
+def _parse_scan_shape(value: Any) -> tuple[int, int] | None:
+    """Parse optional raw navigation scan shape from Stage-2 config."""
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError("Stage 2 config 'scan_shape' must be null or [ny, nx].")
+    scan_shape = (int(value[0]), int(value[1]))
+    if scan_shape[0] <= 0 or scan_shape[1] <= 0:
+        raise ValueError(f"Stage 2 config 'scan_shape' values must be positive: {scan_shape}.")
+    return scan_shape
+
+
 def _build_stage2_summary(
     result: Stage2Result,
     provenance: dict[str, Any],
@@ -309,6 +323,7 @@ def _build_stage2_summary(
 ) -> dict[str, Any]:
     """Build the stage2_summary.json dict."""
     data_path_str = str(_resolve_data_path(cfg, result.manifest))
+    configured_scan_shape = _parse_scan_shape(cfg.get("scan_shape"))
 
     roi_summaries: list[dict[str, Any]] = []
     for r in result.roi_results:
@@ -348,6 +363,7 @@ def _build_stage2_summary(
             "bin_q": cfg.get("bin_q", 2),
             "max_rois": cfg.get("max_rois"),
             "roi_source": cfg.get("roi_source", "roi_candidates"),
+            "scan_shape": list(configured_scan_shape) if configured_scan_shape else None,
         },
         "beam_center": {
             "stage1_yx": list(beam_center_yx) if beam_center_yx else None,
@@ -361,6 +377,7 @@ def _build_stage2_summary(
         "dependencies": {
             "py4DSTEM_used": True,
             "data_path": data_path_str,
+            "scan_shape": list(configured_scan_shape) if configured_scan_shape else None,
         },
         "errors": result.errors if result.errors else None,
     }

@@ -131,7 +131,7 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
 
     # --- Header ----------------------------------------------------------
     lines.extend([
-        f"# Stage 2A ROI Bragg Detection Report — {summary.get('run_name', 'unknown')}",
+        f"# Stage 2A ROI Bragg Detection Report - {summary.get('run_name', 'unknown')}",
         "",
         f"**Output directory:** `{summary.get('output_dir', '?')}`",
         "",
@@ -201,9 +201,9 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
             error = r.get("error")
             if error:
                 lines.append(
-                    f"| {i} | `{r.get('name', '?')}` | — | — | — | — "
-                    f"| — | — | — | — | — | — "
-                    f"| ❌ FAIL: {_escape_md(str(error))} |"
+                    f"| {i} | `{r.get('name', '?')}` | - | - | - | - "
+                    f"| - | - | - | - | - | - "
+                    f"| [FAIL] {_escape_md(str(error))} |"
                 )
                 continue
 
@@ -211,8 +211,8 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
             lines.append(
                 f"| {i} "
                 f"| `{r.get('name', '?')}` "
-                f"| {r.get('cluster_id', '—')} "
-                f"| {_escape_md(str(r.get('reason', '—')))} "
+                f"| {r.get('cluster_id', '-')} "
+                f"| {_escape_md(str(r.get('reason', '-')))} "
                 f"| `{r.get('stage1_bbox', '?')}` "
                 f"| `{r.get('raw_bbox', '?')}` "
                 f"| `{r.get('nav_shape', '?')}` "
@@ -233,7 +233,7 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
 
     if ready:
         lines.extend([
-            "## ✅ Ready for Stage 2B Indexing",
+            "## [READY] Ready for Stage 2B Indexing",
             "",
             "These ROIs have non-zero Bragg peaks, acceptable background,",
             "and a recorded beam centre.  They can proceed to",
@@ -242,7 +242,7 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
         ])
         for r in ready:
             lines.append(
-                f"- **`{r.get('name')}`** — "
+                f"- **`{r.get('name')}`** - "
                 f"cluster {r.get('cluster_id', '?')}, "
                 f"{r.get('n_bragg_peaks', 0)} Bragg peaks, "
                 f"bbox `{r.get('raw_bbox')}`"
@@ -251,7 +251,7 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
 
     if not_ready:
         lines.extend([
-            "## ⚠️ Not Ready for Stage 2B",
+            "## [REVIEW] Not Ready for Stage 2B",
             "",
             "These ROIs succeeded but have issues that should be reviewed",
             "before indexing:",
@@ -266,7 +266,7 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
 
     if failed:
         lines.extend([
-            "## ❌ Failed ROIs",
+            "## [FAIL] Failed ROIs",
             "",
             "These ROIs encountered errors during Bragg detection and",
             "cannot proceed to Stage 2B.",
@@ -295,13 +295,13 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
         "",
         "### Verdicts",
         "",
-        "- **✅ Ready**: ROI has non-zero Bragg peaks, low background,",
+        "- **[READY] Ready**: ROI has non-zero Bragg peaks, low background,",
         "  has a recorded beam centre, and sample coverage is acceptable.",
         "  Can proceed to Stage 2B phase/orientation indexing.",
-        "- **⚠️ Review**: ROI has Bragg peaks but also warnings (high",
+        "- **[REVIEW] Review**: ROI has Bragg peaks but also warnings (high",
         "  background, missing sample coverage, zero peaks, etc.).",
         "  Review the diagnostic outputs before using for indexing.",
-        "- **❌ Skip**: ROI failed Bragg detection or has critical",
+        "- **[SKIP] Skip**: ROI failed Bragg detection or has critical",
         "  validation failures (zero Bragg peaks, entirely outside",
         "  sample, etc.).  Do NOT use for indexing.",
         "",
@@ -310,7 +310,7 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
         "- **BG Frac**: Fraction of pixels in this ROI with fingerprint",
         "  label `-1` (background/vacuum).  Values > 0.5 are flagged.",
         "- **Sample Cov**: Fraction of pixels covered by the Stage-1",
-        "  sample mask.  ``—`` means no sample mask was generated.",
+        "  sample mask.  ``-`` means no sample mask was generated.",
         "- **Beam Source**: Origin of the beam centre used for this ROI.",
         "  `stage1_com` = centre-of-mass from Stage 1 mean DP.",
         "  `py4dstem_calibration` = from file metadata.",
@@ -343,7 +343,7 @@ def _render_stage2_html(markdown: str, summary: dict[str, Any]) -> str:
         '<html lang="en">',
         "<head>",
         '<meta charset="utf-8">',
-        f"<title>Stage 2A Report — {run_name}</title>",
+        f"<title>Stage 2A Report - {run_name}</title>",
         "<style>",
         "  body { font-family: system-ui, -apple-system, sans-serif; ",
         "         max-width: 1100px; margin: 2em auto; padding: 0 1em; ",
@@ -367,7 +367,7 @@ def _render_stage2_html(markdown: str, summary: dict[str, Any]) -> str:
         "<body>",
     ])
 
-    # Simple markdown → HTML conversion
+    # Simple markdown-to-HTML conversion
     in_table = False
     in_code = False
     for line in markdown.splitlines():
@@ -457,16 +457,16 @@ def _indexing_verdict(roi: dict[str, Any]) -> str:
     beam_source = roi.get("beam_center_source", "")
 
     if n_peaks == 0:
-        return "❌ Skip (0 peaks)"
+        return "[SKIP] Skip (0 peaks)"
     if bg_frac is not None and bg_frac > 0.5:
-        return "❌ Skip (>50% bg)"
+        return "[SKIP] Skip (>50% bg)"
     if sample_cov is not None and sample_cov == 0.0:
-        return "❌ Skip (sample 0%)"
+        return "[SKIP] Skip (sample 0%)"
     if beam_source == "detector_center_fallback":
-        return "⚠️ Review (no calib)"
+        return "[REVIEW] Review (no calib)"
     if warning:
-        return "⚠️ Review"
-    return "✅ Ready"
+        return "[REVIEW] Review"
+    return "[READY] Ready"
 
 
 def _is_indexing_ready(roi: dict[str, Any]) -> bool:
@@ -512,7 +512,7 @@ def _indexing_blockers(roi: dict[str, Any]) -> list[str]:
         issues.append(f"validation warning: {warning}")
 
     if not issues:
-        issues.append("unknown — check outputs manually")
+        issues.append("unknown - check outputs manually")
     return issues
 
 
@@ -527,7 +527,7 @@ def _html_escape(text: str) -> str:
 
 
 def _fmt_frac(value: float | None) -> str:
-    """Format a fraction for display, returning '—' for None."""
+    """Format a fraction for display, returning '-' for None."""
     if value is None:
-        return "—"
+        return "-"
     return f"{value:.1%}"
