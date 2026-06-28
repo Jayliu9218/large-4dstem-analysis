@@ -6,7 +6,6 @@ Produces ``stage2_report.md`` (and ``.html``) and
 
 from __future__ import annotations
 
-import base64
 import json
 from pathlib import Path
 from typing import Any
@@ -570,8 +569,13 @@ def _fmt_optional_float(value: float | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# PNG gallery — self-contained HTML with all per-ROI images embedded as
-# base64 data URIs.  No external dependencies; viewable in any browser.
+# PNG gallery — uses relative &lt;img&gt; references to the actual PNG files on
+# disk (no base64 bloat).  Two views are generated:
+#
+# 1. Per-ROI detail — one section per ROI with all its diagnostic PNGs.
+# 2. Cross-ROI comparison — for each image type, all ROIs side-by-side so
+#    you can spot differences between fingerprint classes / candidates at a
+#    glance.
 # ---------------------------------------------------------------------------
 
 # Canonical list of PNGs produced per ROI, in display order, with captions.
@@ -587,12 +591,10 @@ _GALLERY_PNG_SPEC: list[tuple[str, str]] = [
 
 
 def save_stage2_gallery(output_dir: Path, summary: dict[str, Any]) -> Path | None:
-    """Generate a self-contained HTML gallery of all per-ROI PNGs.
+    """Generate ``stage2_gallery.html`` with per-ROI detail and cross-ROI comparisons.
 
-    Scans every ROI directory listed in *summary* for the canonical set of
-    PNG files (Stage 2A diagnostics + Stage 2B template matches when
-    present), encodes them as base64 data URIs, and writes a single
-    ``stage2_gallery.html`` that can be opened in any browser.
+    PNGs are referenced via relative ``<img src>`` paths — the HTML file must
+    stay alongside the ROI directories for images to load.
 
     Parameters
     ----------
@@ -609,8 +611,10 @@ def save_stage2_gallery(output_dir: Path, summary: dict[str, Any]) -> Path | Non
     if not roi_results:
         return None
 
-    # Collect per-ROI PNG data
+    # ── Collect per-ROI data ────────────────────────────────────────────
     roi_galleries: list[dict[str, Any]] = []
+    # comparison_groups: key = filename, value = list of {roi_name, rel_path, caption, meta}
+    comparison_groups: dict[str, list[dict[str, str]]] = {}
     total_pngs = 0
 
     for r in roi_results:
@@ -618,155 +622,236 @@ def save_stage2_gallery(output_dir: Path, summary: dict[str, Any]) -> Path | Non
         if r.get("error"):
             continue
 
-        # Reconstruct the ROI directory from the bragg_summary_path
         bsp = r.get("bragg_summary_path")
         roi_dir = Path(bsp).parent if bsp else output_dir / f"roi_{name}"
+        roi_rel = _rel_path(output_dir, roi_dir)
+
+        # Compact metadata for labels
+        meta = _roi_meta_label(r)
 
         pngs: list[dict[str, str]] = []
         for filename, caption in _GALLERY_PNG_SPEC:
             png_path = roi_dir / filename
             if not png_path.is_file():
                 continue
-            try:
-                raw = png_path.read_bytes()
-            except OSError:
-                continue
-            b64 = base64.b64encode(raw).decode("ascii")
+            rel_path = f"{roi_rel}/{filename}"
             pngs.append({
                 "filename": filename,
                 "caption": caption,
-                "data_uri": f"data:image/png;base64,{b64}",
+                "rel_path": rel_path,
             })
             total_pngs += 1
 
-        if not pngs:
-            continue
+            # Cross-ROI comparison group
+            comparison_groups.setdefault(filename, []).append({
+                "roi_name": name,
+                "rel_path": rel_path,
+                "caption": caption,
+                "meta": meta,
+            })
 
-        # Build a compact metadata summary
-        bq = r.get("bragg_qc") or {}
-        meta_parts: list[str] = []
-        n_peaks = r.get("n_bragg_peaks", 0)
-        meta_parts.append(f"{n_peaks} peaks")
-        bc_source = r.get("beam_center_source", "")
-        if bc_source:
-            meta_parts.append(f"beam: {bc_source}")
-        bg = r.get("background_fraction")
-        if bg is not None:
-            meta_parts.append(f"BG: {bg:.1%}")
-        # Stage 2B fields
-        cp = r.get("candidate_phase")
-        if cp:
-            ms = r.get("match_score")
-            pc = r.get("phase_confidence", "")
-            meta_parts.append(f"candidate: {cp}")
-            if ms is not None:
-                meta_parts.append(f"score: {ms:.3f}")
-            if pc:
-                meta_parts.append(f"confidence: {pc}")
-
-        roi_galleries.append({
-            "name": name,
-            "meta": " · ".join(meta_parts),
-            "pngs": pngs,
-        })
+        if pngs:
+            roi_galleries.append({"name": name, "meta": meta, "pngs": pngs})
 
     if total_pngs == 0:
         return None
 
-    html = _render_gallery_html(summary, roi_galleries, total_pngs)
+    # ── Render ──────────────────────────────────────────────────────────
+    run_name = summary.get("run_name", "unknown")
+    stage1_dir = summary.get("stage1_dir", "")
+    # comparison groups sorted so Stage 2A PNGs come first
+    comp_order = [fn for fn, _ in _GALLERY_PNG_SPEC if fn in comparison_groups]
+
+    html = _render_gallery_html(
+        run_name=run_name,
+        stage1_dir=stage1_dir,
+        n_rois=len(roi_galleries),
+        total_pngs=total_pngs,
+        roi_galleries=roi_galleries,
+        comparison_groups=comparison_groups,
+        comp_order=comp_order,
+    )
     gallery_path = output_dir / "stage2_gallery.html"
     gallery_path.write_text(html, encoding="utf-8")
     return gallery_path
 
 
-def _render_gallery_html(
-    summary: dict[str, Any],
-    roi_galleries: list[dict[str, Any]],
-    total_pngs: int,
-) -> str:
-    """Render the self-contained gallery HTML page."""
-    run_name = summary.get("run_name", "unknown")
-    stage1_dir = summary.get("stage1_dir", "")
+def _rel_path(base: Path, target: Path) -> str:
+    """Return *target* as a relative path from *base*, using forwardslashes."""
+    try:
+        rel = target.relative_to(base)
+    except ValueError:
+        return target.as_posix()
+    return rel.as_posix()
 
+
+def _roi_meta_label(r: dict[str, Any]) -> str:
+    """One-line metadata label for an ROI."""
     parts: list[str] = []
-    parts.append("<!DOCTYPE html>")
-    parts.append('<html lang="en">')
-    parts.append("<head>")
-    parts.append('<meta charset="utf-8">')
-    parts.append(f"<title>Stage 2 PNG Gallery — {run_name}</title>")
-    parts.append("<style>")
-    parts.append("""
-    *, *::before, *::after { box-sizing: border-box; }
-    body {
-        font-family: system-ui, -apple-system, sans-serif;
-        max-width: 1400px; margin: 0 auto; padding: 20px;
-        background: #f5f5f5; color: #222;
-    }
-    h1 { border-bottom: 2px solid #4472C4; padding-bottom: 8px; }
-    h2 { color: #4472C4; margin-top: 32px; }
-    .roi-section {
-        background: #fff; border: 1px solid #ddd; border-radius: 6px;
-        padding: 20px; margin-bottom: 24px;
-    }
-    .roi-meta {
-        font-size: 0.9em; color: #666; margin-bottom: 16px;
-        padding: 8px 12px; background: #f0f4ff; border-radius: 4px;
-    }
-    .png-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
-        gap: 16px;
-    }
-    .png-card {
-        border: 1px solid #e0e0e0; border-radius: 4px;
-        overflow: hidden; background: #fafafa;
-    }
-    .png-card img {
-        width: 100%; height: auto; display: block;
-    }
-    .png-caption {
-        padding: 8px 12px; font-size: 0.85em; color: #555;
-        background: #f8f8f8; border-top: 1px solid #eee;
-    }
-    .toc { margin: 16px 0; }
-    .toc a { margin-right: 12px; color: #4472C4; text-decoration: none; }
-    .toc a:hover { text-decoration: underline; }
-    .summary-bar {
-        background: #fff; border: 1px solid #ddd; border-radius: 6px;
-        padding: 12px 20px; margin-bottom: 24px; font-size: 0.9em;
-    }
-    """)
-    parts.append("</style>")
-    parts.append("</head>")
-    parts.append("<body>")
+    n_peaks = r.get("n_bragg_peaks", 0)
+    parts.append(f"{n_peaks} peaks")
+    bc = r.get("beam_center_source", "")
+    if bc:
+        parts.append(f"beam:{bc}")
+    bg = r.get("background_fraction")
+    if bg is not None:
+        parts.append(f"BG:{bg:.1%}")
+    cp = r.get("candidate_phase")
+    if cp:
+        parts.append(f"{cp}")
+        ms = r.get("match_score")
+        if ms is not None:
+            parts.append(f"score:{ms:.3f}")
+    return " · ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# HTML rendering
+# ---------------------------------------------------------------------------
+
+_GALLERY_CSS = """
+*, *::before, *::after { box-sizing: border-box; }
+body {
+    font-family: system-ui, -apple-system, sans-serif;
+    max-width: 1500px; margin: 0 auto; padding: 20px;
+    background: #f5f5f5; color: #222;
+}
+h1 { border-bottom: 2px solid #4472C4; padding-bottom: 8px; }
+h2 { color: #4472C4; margin-top: 36px; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+h3 { color: #333; margin-top: 24px; }
+.summary-bar {
+    background: #fff; border: 1px solid #ddd; border-radius: 6px;
+    padding: 12px 20px; margin-bottom: 24px; font-size: 0.9em;
+}
+.toc { margin: 16px 0; line-height: 1.8; }
+.toc a { margin-right: 14px; color: #4472C4; text-decoration: none; }
+.toc a:hover { text-decoration: underline; }
+
+/* ── Per-ROI detail ── */
+.roi-section {
+    background: #fff; border: 1px solid #ddd; border-radius: 6px;
+    padding: 20px; margin-bottom: 24px;
+}
+.roi-meta {
+    font-size: 0.9em; color: #555; margin-bottom: 16px;
+    padding: 8px 12px; background: #f0f4ff; border-radius: 4px;
+}
+.png-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+    gap: 16px;
+}
+.png-card {
+    border: 1px solid #e0e0e0; border-radius: 4px;
+    overflow: hidden; background: #fafafa;
+}
+.png-card img { width: 100%; height: auto; display: block; }
+.png-caption {
+    padding: 8px 12px; font-size: 0.85em; color: #555;
+    background: #f8f8f8; border-top: 1px solid #eee;
+}
+
+/* ── Cross-ROI comparison ── */
+.comp-section {
+    background: #fff; border: 1px solid #ddd; border-radius: 6px;
+    padding: 20px; margin-bottom: 24px;
+}
+.comp-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+}
+.comp-card {
+    border: 1px solid #e0e0e0; border-radius: 4px;
+    overflow: hidden; background: #fafafa;
+}
+.comp-card img { width: 100%; height: auto; display: block; }
+.comp-label {
+    padding: 6px 10px; font-size: 0.8em; color: #4472C4; font-weight: 600;
+    background: #f0f4ff; border-bottom: 1px solid #eee;
+}
+.comp-meta {
+    padding: 4px 10px; font-size: 0.75em; color: #777;
+    background: #f8f8f8; border-top: 1px solid #eee;
+}
+"""
+
+
+def _render_gallery_html(
+    *,
+    run_name: str,
+    stage1_dir: str,
+    n_rois: int,
+    total_pngs: int,
+    roi_galleries: list[dict[str, Any]],
+    comparison_groups: dict[str, list[dict[str, str]]],
+    comp_order: list[str],
+) -> str:
+    """Render the full gallery HTML."""
+    p: list[str] = []
+    p.append("<!DOCTYPE html>")
+    p.append('<html lang="en"><head>')
+    p.append('<meta charset="utf-8">')
+    p.append(f"<title>Stage 2 PNG Gallery — {run_name}</title>")
+    p.append(f"<style>{_GALLERY_CSS}</style>")
+    p.append("</head><body>")
 
     # Header
-    parts.append(f"<h1>Stage 2 PNG Gallery — {run_name}</h1>")
-    parts.append('<div class="summary-bar">')
-    parts.append(f"Stage 1: <code>{stage1_dir}</code><br>")
-    parts.append(f"ROIs with images: {len(roi_galleries)} · Total PNGs: {total_pngs}")
-    parts.append("</div>")
+    p.append(f"<h1>Stage 2 PNG Gallery — {run_name}</h1>")
+    p.append('<div class="summary-bar">')
+    p.append(f"Stage 1: <code>{stage1_dir}</code><br>")
+    p.append(f"ROIs with images: {n_rois} · Total PNGs: {total_pngs}")
+    p.append("</div>")
 
     # Table of contents
-    parts.append('<div class="toc"><strong>Jump to ROI:</strong> ')
+    p.append('<div class="toc"><strong>Jump to ROI:</strong> ')
     for i, rg in enumerate(roi_galleries):
-        parts.append(f'<a href="#roi-{i}">{rg["name"]}</a>')
-    parts.append("</div>")
+        p.append(f'<a href="#roi-{i}">{rg["name"]}</a>')
+    p.append("</div>")
+    p.append('<div class="toc"><strong>Jump to comparison:</strong> ')
+    for fn in comp_order:
+        cap = next((c for f, c in _GALLERY_PNG_SPEC if f == fn), fn)
+        p.append(f'<a href="#comp-{fn}">{cap}</a>')
+    p.append("</div>")
 
-    # Per-ROI sections
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 1 — Per-ROI detail
+    # ══════════════════════════════════════════════════════════════════════
+    p.append("<h2>Per-ROI Detail</h2>")
     for i, rg in enumerate(roi_galleries):
-        parts.append(f'<div class="roi-section" id="roi-{i}">')
-        parts.append(f"<h2>{rg['name']}</h2>")
-        parts.append(f'<div class="roi-meta">{rg["meta"]}</div>')
-        parts.append('<div class="png-grid">')
+        p.append(f'<div class="roi-section" id="roi-{i}">')
+        p.append(f"<h3>{rg['name']}</h3>")
+        p.append(f'<div class="roi-meta">{rg["meta"]}</div>')
+        p.append('<div class="png-grid">')
         for png in rg["pngs"]:
-            parts.append('<div class="png-card">')
-            parts.append(f'<img src="{png["data_uri"]}" alt="{png["filename"]}" loading="lazy">')
-            parts.append(f'<div class="png-caption">{png["caption"]}</div>')
-            parts.append("</div>")
-        parts.append("</div>")  # .png-grid
-        parts.append("</div>")  # .roi-section
+            p.append('<div class="png-card">')
+            p.append(f'<img src="{png["rel_path"]}" alt="{png["filename"]}" loading="lazy">')
+            p.append(f'<div class="png-caption">{png["caption"]}</div>')
+            p.append("</div>")
+        p.append("</div></div>")
 
-    parts.append("</body>")
-    parts.append("</html>")
-    return "\n".join(parts)
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 2 — Cross-ROI comparison (by image type)
+    # ══════════════════════════════════════════════════════════════════════
+    if len(roi_galleries) > 1:
+        p.append("<h2>Cross-ROI Comparison</h2>")
+        p.append("<p>Same diagnostic, all ROIs side-by-side. "
+                  "Useful for spotting class differences at a glance.</p>")
+        for fn in comp_order:
+            entries = comparison_groups[fn]
+            if len(entries) < 2:
+                continue
+            cap = next((c for f, c in _GALLERY_PNG_SPEC if f == fn), fn)
+            p.append(f'<div class="comp-section" id="comp-{fn}">')
+            p.append(f"<h3>{cap}</h3>")
+            p.append('<div class="comp-grid">')
+            for e in entries:
+                p.append('<div class="comp-card">')
+                p.append(f'<div class="comp-label">{e["roi_name"]}</div>')
+                p.append(f'<img src="{e["rel_path"]}" alt="{fn} @ {e["roi_name"]}" loading="lazy">')
+                p.append(f'<div class="comp-meta">{e["meta"]}</div>')
+                p.append("</div>")
+            p.append("</div></div>")
+
+    p.append("</body></html>")
+    return "\n".join(p)
