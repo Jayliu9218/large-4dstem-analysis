@@ -139,6 +139,23 @@ def _extract_beam_center_from_calibration(cube: Any) -> tuple[float, float] | No
         return None
 
 
+def _to_raw_detector_center(
+    center_yx: tuple[float, float],
+    q_crop: list[int] | None,
+    q_bin: int,
+) -> tuple[float, float]:
+    """Convert a beam centre from preprocessed to raw detector coordinates.
+
+    Stage 1 computes the beam centre on the preprocessed data (after ``q_crop``
+    and ``q_bin``).  The ROI data slice uses the raw detector, so the centre
+    must be mapped back: ``raw = preprocessed * q_bin + crop_offset``.
+    """
+    q_bin = max(1, int(q_bin))
+    qy0 = q_crop[0] if q_crop else 0
+    qx0 = q_crop[2] if q_crop else 0
+    return (center_yx[0] * q_bin + qy0, center_yx[1] * q_bin + qx0)
+
+
 def _detector_center(sig_shape: tuple[int, ...]) -> tuple[float, float]:
     """Return the geometric centre of the detector ``(qy, qx)``."""
     return ((sig_shape[0] - 1) / 2.0, (sig_shape[1] - 1) / 2.0)
@@ -484,10 +501,19 @@ def run_roi_bragg_for_rois(
     log.info("Imported cube shape: %s (detector: %s)", actual_shape, actual_shape[2:])
 
     # --- Resolve beam centre -------------------------------------------------
+    # Stage 1 beam centre is computed on the *preprocessed* detector (after
+    # q_crop and q_bin).  The ROI data extracted below uses the *raw* detector,
+    # so we must convert back to raw coordinates when q_crop / q_bin are known.
     beam_center_source: str
     if beam_center_yx is not None:
         beam_center_source = "stage1_com"
-        log.info("Using Stage-1 COM beam centre: (%.3f, %.3f)", *beam_center_yx)
+        beam_center_yx = _to_raw_detector_center(
+            beam_center_yx, manifest.q_crop, manifest.q_bin,
+        )
+        log.info(
+            "Using Stage-1 COM beam centre (converted to raw detector): (%.3f, %.3f)",
+            *beam_center_yx,
+        )
     else:
         # Try py4DSTEM calibration
         cal_center = _extract_beam_center_from_calibration(cube)
