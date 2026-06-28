@@ -1691,6 +1691,53 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(df.iloc[2]["scan_y"], 0)
         self.assertEqual(df.iloc[2]["scan_x"], 1)
 
+    def test_stage2_gallery_generates_self_contained_html(self):
+        """Gallery HTML embeds base64 PNGs and is viewable standalone."""
+        from fourdstem_pipeline.export_stage2 import save_stage2_gallery
+
+        # Create a minimal fake ROI directory with one PNG
+        roi_dir = self.output_dir / "roi_test_gallery"
+        roi_dir.mkdir(parents=True)
+        # Write a minimal valid PNG (1x1 red pixel via raw bytes)
+        import struct, zlib
+        def _tiny_png():
+            sig = b'\x89PNG\r\n\x1a\n'
+            ihdr_data = struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0)
+            ihdr_crc = struct.pack('>I', zlib.crc32(b'IHDR' + ihdr_data) & 0xFFFFFFFF)
+            idat_raw = zlib.compress(b'\x00\xff\x00\x00')  # red pixel
+            idat_crc = struct.pack('>I', zlib.crc32(b'IDAT' + idat_raw) & 0xFFFFFFFF)
+            return sig + struct.pack('>I', 13) + b'IHDR' + ihdr_data + ihdr_crc \
+                 + struct.pack('>I', len(idat_raw)) + b'IDAT' + idat_raw + idat_crc \
+                 + struct.pack('>I', 0) + b'IEND' + struct.pack('>I', zlib.crc32(b'IEND') & 0xFFFFFFFF)
+        (roi_dir / "mean_dp.png").write_bytes(_tiny_png())
+        (roi_dir / "bragg_vector_map.png").write_bytes(_tiny_png())
+
+        summary = {
+            "run_name": "gallery_test",
+            "stage1_dir": str(self.output_dir),
+            "roi_results": [{
+                "name": "test_gallery",
+                "error": None,
+                "bragg_summary_path": str(roi_dir / "bragg_summary.json"),
+                "n_bragg_peaks": 42,
+                "beam_center_source": "stage1_com",
+                "background_fraction": 0.05,
+            }],
+        }
+        gallery_path = save_stage2_gallery(self.output_dir, summary)
+        self.assertIsNotNone(gallery_path)
+        self.assertTrue(gallery_path.exists())
+
+        html = gallery_path.read_text(encoding="utf-8")
+        self.assertIn("<!DOCTYPE html>", html)
+        self.assertIn("test_gallery", html)
+        self.assertIn("42 peaks", html)
+        self.assertIn("data:image/png;base64,", html)
+        # Should have 2 PNGs embedded
+        self.assertEqual(html.count("data:image/png;base64,"), 2)
+        # No broken image references
+        self.assertNotIn('src=""', html)
+
     # ------------------------------------------------------------------
     # Stage 2A correctness: cluster validation
     # ------------------------------------------------------------------

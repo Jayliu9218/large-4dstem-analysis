@@ -175,6 +175,17 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
 
     summary_path = output_dir / "stage2_indexing_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+
+    # --- Update the Stage 2 PNG gallery (now includes Stage 2B match PNGs) ---
+    try:
+        from .export_stage2 import save_stage2_gallery
+
+        gallery_path = save_stage2_gallery(stage2_dir, stage2a_summary)
+        if gallery_path is not None:
+            log.info("Stage 2 PNG gallery updated: %s", gallery_path)
+    except Exception as exc:
+        log.warning("Failed to update Stage 2 PNG gallery: %s", exc)
+
     return summary
 
 

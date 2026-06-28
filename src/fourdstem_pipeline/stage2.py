@@ -17,7 +17,7 @@ import yaml
 
 from .config import load_workflow_config
 from .contracts import Stage1Manifest, Stage1ManifestLoadError
-from .export_stage2 import build_benchmark, save_stage2_benchmark, save_stage2_report
+from .export_stage2 import build_benchmark, save_stage2_benchmark, save_stage2_gallery, save_stage2_report
 from .logging import configure_pipeline_logging, get_logger
 from .provenance import collect_provenance, save_provenance
 from .roi_bragg import (
@@ -218,6 +218,13 @@ def run_stage2(config: str | Path | dict[str, Any]) -> Stage2Result:
         log.info("Stage 2 report written: %s, %s", report_md, report_html)
     except Exception as exc:
         log.warning("Failed to generate Stage 2 report: %s", exc)
+
+    try:
+        gallery_path = save_stage2_gallery(output_dir, summary)
+        if gallery_path is not None:
+            log.info("Stage 2 PNG gallery written: %s", gallery_path)
+    except Exception as exc:
+        log.warning("Failed to generate Stage 2 PNG gallery: %s", exc)
 
     try:
         benchmark_entries = _build_benchmark_entries(result, cfg)
