@@ -22,7 +22,7 @@ template_generation:
   zone_axis: [0, 0, 1]
   orientation_step_deg: 5
   orientations_deg: null
-  peak_sigma_px: 1.2
+  peak_sigma_px: 5.0
   reciprocal_pixels_per_inv_angstrom: null
   intensity_power: 2.0
 

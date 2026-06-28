@@ -20,6 +20,7 @@ import numpy as np
 import yaml
 
 from .contracts import is_roi_ready_for_indexing
+from .export import save_bar_png, save_png
 
 log = logging.getLogger(__name__)
 
@@ -322,10 +323,22 @@ def _template_match_roi(
                 "candidate": candidate,
                 "score": score,
                 "orientation_deg": float(orientations[idx]) if idx < len(orientations) else None,
+                "all_scores": [float(s) for s in scores],
+                "orientations_deg": orientations,
+                "best_template_idx": idx,
+                "stack": stack,
             }
 
     if best is None:
         return None
+
+    # --- Save visualisations ------------------------------------------------
+    _save_match_visuals(
+        roi.get("name", "unknown"),
+        roi.get("bragg_summary_path", ""),
+        mean_dp,
+        best,
+    )
 
     score = round(float(best["score"]), 4)
     return ROIIndexingResult(
@@ -341,6 +354,61 @@ def _template_match_roi(
         template_score=score,
         scoring_mode="template_match",
     )
+
+
+def _save_match_visuals(
+    roi_name: str,
+    bragg_summary_path: str,
+    mean_dp: np.ndarray,
+    best: dict[str, Any],
+) -> None:
+    """Save Stage 2B matching PNGs for the best candidate.
+
+    Writes into the same directory as the ROI's ``bragg_summary.json``:
+    - ``template_best_match.png`` — the best-matching template
+    - ``template_match_overlay.png`` — mean DP (gray) + template peaks (green)
+    - ``correlation_vs_angle.png`` — bar chart of correlation vs. orientation
+    """
+    try:
+        roi_dir = Path(bragg_summary_path).parent
+        roi_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return
+
+    try:
+        # Best template image
+        best_template = best["stack"][best["best_template_idx"]]
+        save_png(roi_dir / "template_best_match.png", best_template)
+
+        # Overlay: mean DP (gray) + template (green)
+        base = np.asarray(mean_dp, dtype=np.float32)
+        finite = base[np.isfinite(base)]
+        if finite.size > 0:
+            lo, hi = float(np.percentile(finite, 1)), float(np.percentile(finite, 99))
+            if hi <= lo:
+                hi = lo + 1.0
+            gray = np.clip(
+                (np.log1p(base) - np.log1p(lo)) / max(np.log1p(hi) - np.log1p(lo), 1e-12) * 255,
+                0, 255,
+            ).astype(np.uint8)
+        else:
+            gray = np.zeros(base.shape, dtype=np.uint8)
+        overlay = np.stack([gray, gray, gray], axis=-1).copy()
+        # Green channel = 50% template intensity
+        tmpl_norm = _scale_unit_interval(best_template)
+        green = (tmpl_norm * 200).astype(np.uint8)
+        overlay[:, :, 1] = np.maximum(overlay[:, :, 1], green)
+        save_png(roi_dir / "template_match_overlay.png", overlay)
+
+        # Correlation vs angle bar chart
+        scores_arr = np.asarray(best["all_scores"], dtype=np.float32)
+        if scores_arr.size > 0:
+            save_bar_png(
+                roi_dir / "correlation_vs_angle.png",
+                scores_arr.reshape(1, -1),
+            )
+    except Exception:
+        pass
 
 
 def _mock_score_roi_against_candidates(
@@ -401,7 +469,7 @@ def _template_config(raw: dict[str, Any]) -> dict[str, Any]:
         "max_index": int(raw.get("max_index", 4)),
         "orientations_deg": orientations,
         "zone_axis": _parse_zone_axis(raw.get("zone_axis", [0, 0, 1])),
-        "peak_sigma_px": float(raw.get("peak_sigma_px", 1.2)),
+        "peak_sigma_px": float(raw.get("peak_sigma_px", 5.0)),
         "reciprocal_pixels_per_inv_angstrom": (
             None if raw.get("reciprocal_pixels_per_inv_angstrom") is None
             else float(raw["reciprocal_pixels_per_inv_angstrom"])

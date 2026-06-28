@@ -28,6 +28,7 @@ import numpy as np
 import yaml
 
 from .contracts import Stage1Manifest
+from .export import save_png
 from .logging import get_logger
 
 log = get_logger(__name__)
@@ -258,6 +259,50 @@ def _validate_roi_cluster_binned(
         result["warning"] = " | ".join(warnings)
 
     return result
+
+
+def _save_bragg_visuals(
+    roi_dir: Path,
+    vmap: np.ndarray,
+    mean_dp_binned: np.ndarray | None = None,
+) -> None:
+    """Save PNG visualisations of the Bragg vector map.
+
+    Produces ``bragg_vector_map.png`` and, when *mean_dp_binned* is
+    available, ``bragg_overlay.png`` with Bragg peak positions overlaid
+    in green on the log-scale mean diffraction pattern.
+    """
+    try:
+        save_png(roi_dir / "bragg_vector_map.png", vmap)
+    except Exception:
+        pass
+
+    if mean_dp_binned is not None and np.count_nonzero(vmap) > 0:
+        try:
+            # Find Bragg peak positions (non-zero pixels in vmap)
+            peaks_y, peaks_x = np.nonzero(vmap)
+            base = np.asarray(mean_dp_binned, dtype=np.float32)
+            # Scale base to uint8 gray
+            finite = base[np.isfinite(base)]
+            if finite.size > 0:
+                lo, hi = float(np.percentile(finite, 1)), float(np.percentile(finite, 99))
+                if hi <= lo:
+                    hi = lo + 1.0
+                gray = np.clip((np.log1p(base) - np.log1p(lo)) / max(np.log1p(hi) - np.log1p(lo), 1e-12) * 255, 0, 255).astype(np.uint8)
+            else:
+                gray = np.zeros(base.shape, dtype=np.uint8)
+            rgb = np.stack([gray, gray, gray], axis=-1).copy()
+            # Mark Bragg peak positions in green, with a small cross
+            for py, px in zip(peaks_y, peaks_x):
+                y0 = max(0, int(py) - 2)
+                y1 = min(rgb.shape[0], int(py) + 3)
+                x0 = max(0, int(px) - 2)
+                x1 = min(rgb.shape[1], int(px) + 3)
+                rgb[y0:y1, int(px), :] = [0, 255, 0]
+                rgb[int(py), x0:x1, :] = [0, 255, 0]
+            save_png(roi_dir / "bragg_overlay.png", rgb)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -731,6 +776,13 @@ def _process_one_roi(
     roi_data_path = roi_dir / "roi_data.npy"
     np.save(roi_data_path, roi_data)
 
+    # --- Visualise mean diffraction pattern ----------------------------------
+    try:
+        mean_dp = np.asarray(roi_data.mean(axis=(0, 1)), dtype=np.float32)
+        save_png(roi_dir / "mean_dp.png", np.log1p(mean_dp))
+    except Exception:
+        pass
+
     # --- Build py4DSTEM DataCube and bin ------------------------------------
     dc_roi = py4DSTEM.DataCube(roi_data, name=name, calibration=cube.calibration)
     binned_sig_shape = sig_shape
@@ -762,6 +814,10 @@ def _process_one_roi(
     bragg_vector_map_path = roi_dir / "bragg_vector_map.npy"
     np.save(bragg_vector_map_path, vmap)
     n_peaks = int(np.count_nonzero(vmap))
+
+    # --- Visualise Bragg vector map + overlay on mean DP ---------------------
+    _save_bragg_visuals(roi_dir, vmap, mean_dp_binned=template)
+
     t_bragg_end = time.perf_counter()
     bragg_time_s = t_bragg_end - t_bragg_start
 
