@@ -25,10 +25,11 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import yaml
 
 from .contracts import Stage1Manifest
-from .export import save_png
+from .export import save_bar_png, save_png
 from .logging import get_logger
 
 log = get_logger(__name__)
@@ -261,6 +262,250 @@ def _validate_roi_cluster_binned(
     return result
 
 
+def _save_bragg_peaks_table(
+    bragg: Any,
+    roi_dir: Path,
+    scan_shape: tuple[int, int],
+) -> tuple[Path | None, dict[str, Any]]:
+    """Extract per-peak tabular data from py4DSTEM and save as Parquet.
+
+    Iterates the ``bragg.raw`` :class:`PointListArray` and collects every
+    detected Bragg peak into a flat table with columns:
+
+    - ``scan_y``, ``scan_x`` — navigation (real-space) position
+    - ``qy``, ``qx`` — peak position in detector pixels
+    - ``intensity`` — correlation intensity from the template match
+    - ``snr`` — placeholder (NaN; requires subpixel noise model)
+
+    Parameters
+    ----------
+    bragg:
+        py4DSTEM :class:`BraggVectors` object returned by ``find_Bragg_disks()``.
+    roi_dir:
+        Per-ROI output directory.
+    scan_shape:
+        Navigation shape ``(ny, nx)`` of the extracted ROI (after thinning).
+
+    Returns
+    -------
+    ``(parquet_path, summary)`` tuple.  *parquet_path* is *None* if no peaks
+    were detected.  *summary* is a dict with keys ``parquet_rows``,
+    ``parquet_columns``, ``peaks_per_pattern_mean``, ``peaks_per_pattern_std``.
+    """
+    scan_ys: list[np.ndarray] = []
+    scan_xs: list[np.ndarray] = []
+    qys: list[np.ndarray] = []
+    qxs: list[np.ndarray] = []
+    intensities: list[np.ndarray] = []
+
+    ny, nx = scan_shape
+    peaks_per_pattern: list[int] = []
+
+    try:
+        for ry in range(ny):
+            for rx in range(nx):
+                try:
+                    v = bragg.raw[rx, ry]
+                except (IndexError, AttributeError, TypeError):
+                    continue
+                n = len(v.data) if hasattr(v, "data") else 0
+                if n == 0:
+                    peaks_per_pattern.append(0)
+                    continue
+                peaks_per_pattern.append(n)
+                scan_ys.append(np.full(n, ry, dtype=np.int32))
+                scan_xs.append(np.full(n, rx, dtype=np.int32))
+                try:
+                    qys.append(np.asarray(v.qy, dtype=np.float32))
+                    qxs.append(np.asarray(v.qx, dtype=np.float32))
+                    intensities.append(np.asarray(v.I, dtype=np.float32))
+                except AttributeError:
+                    # Fallback: try accessing the structured data directly
+                    data = np.asarray(v.data)
+                    qys.append(data["qy"].astype(np.float32))
+                    qxs.append(data["qx"].astype(np.float32))
+                    intensities.append(data["intensity"].astype(np.float32))
+    except Exception:
+        # If the BraggVectors object doesn't support raw[rx, ry] indexing,
+        # fall through with empty results.
+        pass
+
+    n_total = sum(arr.size for arr in scan_ys)
+    if n_total == 0:
+        return None, {
+            "parquet_rows": 0,
+            "parquet_columns": [],
+            "peaks_per_pattern_mean": None,
+            "peaks_per_pattern_std": None,
+        }
+
+    df = pd.DataFrame({
+        "scan_y": np.concatenate(scan_ys),
+        "scan_x": np.concatenate(scan_xs),
+        "qy": np.concatenate(qys),
+        "qx": np.concatenate(qxs),
+        "intensity": np.concatenate(intensities),
+        "snr": np.full(n_total, np.nan, dtype=np.float32),
+    })
+
+    parquet_path = roi_dir / "bragg_peaks.parquet"
+    df.to_parquet(parquet_path, engine="pyarrow", index=False)
+
+    pp_arr = np.array(peaks_per_pattern, dtype=np.float64)
+    return parquet_path, {
+        "parquet_rows": n_total,
+        "parquet_columns": list(df.columns),
+        "peaks_per_pattern_mean": round(float(pp_arr.mean()), 2) if pp_arr.size > 0 else None,
+        "peaks_per_pattern_std": round(float(pp_arr.std()), 2) if pp_arr.size > 0 else None,
+    }
+
+
+def _compute_bragg_qc_metrics(
+    vmap: np.ndarray,
+    beam_center_yx: tuple[float, float] | None,
+    sig_shape: tuple[int, int],
+    min_peak_spacing: float = 4.0,
+    edge_boundary: int = 10,
+    center_zone_radius: float = 5.0,
+) -> dict[str, Any]:
+    """Compute per-ROI Bragg-peak quality metrics from the vector map.
+
+    Parameters
+    ----------
+    vmap:
+        2D Bragg vector map histogram (shape ``(qy, qx)``).  Non-zero pixels
+        mark detector bins where py4DSTEM found at least one Bragg disk.
+    beam_center_yx:
+        Beam centre ``(qy, qx)`` in the same (binned) detector coordinates as
+        *vmap*, or *None* if no beam centre is available.
+    sig_shape:
+        Detector shape ``(qy, qx)`` in the same space as *vmap*.
+    min_peak_spacing:
+        Minimum allowed spacing between distinct Bragg peaks (pixels).  Used
+        to compute the duplicate-peak fraction.
+    edge_boundary:
+        Distance from detector edges (pixels).  Peaks within this margin
+        count toward the edge-peak fraction.
+    center_zone_radius:
+        Radius around the beam centre (pixels).  Peaks within this zone are
+        likely central-beam / bright-field tail rather than genuine Bragg
+        disks.
+
+    Returns
+    -------
+    dict with keys:
+        peak_pixel_count, total_peak_votes, mean_peak_intensity,
+        radial_distances (list or null), radial_distance_mean,
+        radial_distance_std, forbidden_center_zone_fraction,
+        edge_peak_fraction, duplicate_peak_fraction,
+        beam_center_error_estimate
+    """
+    peak_rows, peak_cols = np.nonzero(vmap)
+    n_peaks = len(peak_rows)
+    intensities = vmap[peak_rows, peak_cols].astype(np.float64)
+
+    if n_peaks == 0:
+        return {
+            "peak_pixel_count": 0,
+            "total_peak_votes": 0,
+            "mean_peak_intensity": 0.0,
+            "radial_distances": None,
+            "radial_distance_mean": None,
+            "radial_distance_std": None,
+            "forbidden_center_zone_fraction": 0.0,
+            "edge_peak_fraction": 0.0,
+            "duplicate_peak_fraction": 0.0,
+            "beam_center_error_estimate": None,
+        }
+
+    # --- Radial distances from beam centre ---------------------------------
+    radial_distances: list[float] | None = None
+    radial_mean: float | None = None
+    radial_std: float | None = None
+    center_zone_frac: float = 0.0
+    beam_center_err: float | None = None
+
+    if beam_center_yx is not None:
+        dy = peak_rows.astype(np.float64) - float(beam_center_yx[0])
+        dx = peak_cols.astype(np.float64) - float(beam_center_yx[1])
+        radial = np.sqrt(dy ** 2 + dx ** 2)
+        radial_distances = [float(r) for r in radial]
+        radial_mean = float(np.mean(radial))
+        radial_std = float(np.std(radial))
+        center_zone_frac = float(np.mean(radial < center_zone_radius))
+
+        # Beam-centre error: systematic offset between peak centroid and
+        # nominal centre.  For a well-centred symmetric pattern this should
+        # be small.
+        centroid_y = float(np.mean(peak_rows.astype(np.float64)))
+        centroid_x = float(np.mean(peak_cols.astype(np.float64)))
+        beam_center_err = float(np.sqrt(
+            (centroid_y - float(beam_center_yx[0])) ** 2
+            + (centroid_x - float(beam_center_yx[1])) ** 2
+        ))
+
+    # --- Edge-peak fraction -------------------------------------------------
+    qy, qx = sig_shape
+    edge_mask = (
+        (peak_rows < edge_boundary)
+        | (peak_rows >= qy - edge_boundary)
+        | (peak_cols < edge_boundary)
+        | (peak_cols >= qx - edge_boundary)
+    )
+    edge_frac = float(np.mean(edge_mask))
+
+    # --- Duplicate-peak fraction ---------------------------------------------
+    # A peak is "duplicate" if it has at least one neighbour peak within
+    # min_peak_spacing pixels.  Use a simple N^2 scan for small peak sets;
+    # fall back to an approximate grid-based check for very large sets.
+    dup_frac: float = 0.0
+    if n_peaks > 1:
+        positions = np.column_stack([peak_rows.astype(np.float64), peak_cols.astype(np.float64)])
+        dup_mask = np.zeros(n_peaks, dtype=bool)
+        # For up to ~2000 peaks the N^2 scan is fast enough.
+        if n_peaks <= 2000:
+            for i in range(n_peaks):
+                if dup_mask[i]:
+                    continue
+                dists = np.sqrt(np.sum((positions - positions[i]) ** 2, axis=1))
+                dists[i] = np.inf  # exclude self
+                if np.any(dists < min_peak_spacing):
+                    dup_mask[i] = True
+        else:
+            # Grid-based: bin peaks into cells of size min_peak_spacing;
+            # check the 3×3 neighbourhood for each cell.
+            cell = min_peak_spacing
+            for i in range(n_peaks):
+                if dup_mask[i]:
+                    continue
+                dy = np.abs(positions[:, 0] - positions[i, 0])
+                dx = np.abs(positions[:, 1] - positions[i, 1])
+                nearby = (dy < cell) & (dx < cell)
+                nearby[i] = False
+                if not np.any(nearby):
+                    continue
+                dists = np.sqrt(
+                    (positions[nearby, 0] - positions[i, 0]) ** 2
+                    + (positions[nearby, 1] - positions[i, 1]) ** 2
+                )
+                if np.any(dists < min_peak_spacing):
+                    dup_mask[i] = True
+        dup_frac = float(np.mean(dup_mask))
+
+    return {
+        "peak_pixel_count": n_peaks,
+        "total_peak_votes": int(np.sum(intensities)),
+        "mean_peak_intensity": round(float(np.mean(intensities)), 2),
+        "radial_distances": radial_distances,
+        "radial_distance_mean": round(radial_mean, 2) if radial_mean is not None else None,
+        "radial_distance_std": round(radial_std, 2) if radial_std is not None else None,
+        "forbidden_center_zone_fraction": round(center_zone_frac, 4),
+        "edge_peak_fraction": round(edge_frac, 4),
+        "duplicate_peak_fraction": round(dup_frac, 4),
+        "beam_center_error_estimate": round(beam_center_err, 2) if beam_center_err is not None else None,
+    }
+
+
 def _save_bragg_visuals(
     roi_dir: Path,
     vmap: np.ndarray,
@@ -362,6 +607,7 @@ class ROIBraggResult:
     roi_data_path: Path | None = None
     bragg_vector_map_path: Path | None = None
     bragg_summary_path: Path | None = None
+    bragg_peaks_parquet_path: Path | None = None
     n_peaks: int = 0
     beam_center_yx: list[float] | None = None
     beam_center_source: str | None = None
@@ -371,6 +617,7 @@ class ROIBraggResult:
     sample_mask_coverage: float | None = None
     cluster_validation_warning: str | None = None
     error: str | None = None
+    bragg_qc: dict[str, Any] | None = None
     # Benchmark fields
     extraction_time_s: float = 0.0
     bragg_time_s: float = 0.0
@@ -808,12 +1055,48 @@ def _process_one_roi(
         CUDA=bool(bragg_kwargs.get("CUDA", False)),
     )
 
+    # --- Save tabular Bragg peaks (parquet) ----------------------------------
+    parquet_path, parquet_summary = _save_bragg_peaks_table(
+        bragg, roi_dir, scan_shape=nav_shape_roi,
+    )
+
     # --- Save Bragg vector map ----------------------------------------------
     histogram = bragg.histogram(mode="cal")
     vmap = np.asarray(histogram.data, dtype=np.float32)
     bragg_vector_map_path = roi_dir / "bragg_vector_map.npy"
     np.save(bragg_vector_map_path, vmap)
     n_peaks = int(np.count_nonzero(vmap))
+
+    # --- Bragg peak QC metrics ------------------------------------------------
+    beam_center_binned: tuple[float, float] | None = None
+    if beam_center_yx is not None:
+        beam_center_binned = (
+            float(beam_center_yx[0]) / float(bin_q),
+            float(beam_center_yx[1]) / float(bin_q),
+        )
+    bragg_qc = _compute_bragg_qc_metrics(
+        vmap,
+        beam_center_yx=beam_center_binned,
+        sig_shape=tuple(binned_sig_shape),
+        min_peak_spacing=float(bragg_kwargs.get("minPeakSpacing", 4)),
+        edge_boundary=int(bragg_kwargs.get("edgeBoundary", 10)),
+    )
+
+    # --- Per-pattern peak counts (from parquet summary) ----------------------
+    bragg_qc["peaks_per_pattern_mean"] = parquet_summary.get("peaks_per_pattern_mean")
+    bragg_qc["peaks_per_pattern_std"] = parquet_summary.get("peaks_per_pattern_std")
+
+    # --- Radius histogram PNG -------------------------------------------------
+    if bragg_qc.get("radial_distances") is not None:
+        try:
+            radial_arr = np.asarray(bragg_qc["radial_distances"], dtype=np.float32)
+            if radial_arr.size > 0:
+                save_bar_png(
+                    roi_dir / "bragg_peak_radius_histogram.png",
+                    radial_arr.reshape(1, -1),
+                )
+        except Exception:
+            pass
 
     # --- Visualise Bragg vector map + overlay on mean DP ---------------------
     _save_bragg_visuals(roi_dir, vmap, mean_dp_binned=template)
@@ -866,6 +1149,12 @@ def _process_one_roi(
             "data_path": data_path_str,
             "scan_shape": list(scan_shape),
         },
+        "bragg_peaks_parquet": {
+            "path": str(parquet_path) if parquet_path else None,
+            "rows": parquet_summary["parquet_rows"],
+            "columns": parquet_summary["parquet_columns"],
+        },
+        "bragg_qc": bragg_qc,
         "benchmark": {
             "extraction_time_s": round(extraction_time_s, 4),
             "bragg_time_s": round(bragg_time_s, 4),
@@ -889,6 +1178,7 @@ def _process_one_roi(
         roi_data_path=roi_data_path,
         bragg_vector_map_path=bragg_vector_map_path,
         bragg_summary_path=bragg_summary_path,
+        bragg_peaks_parquet_path=parquet_path,
         n_peaks=n_peaks,
         beam_center_yx=beam_cyx_list,
         beam_center_source=beam_center_source,
@@ -897,6 +1187,7 @@ def _process_one_roi(
         background_fraction=cluster_validation.get("background_fraction"),
         sample_mask_coverage=cluster_validation.get("sample_mask_coverage"),
         cluster_validation_warning=cluster_validation.get("warning"),
+        bragg_qc=bragg_qc,
         extraction_time_s=round(extraction_time_s, 4),
         bragg_time_s=round(bragg_time_s, 4),
         total_time_s=round(extraction_time_s + bragg_time_s, 4),

@@ -344,6 +344,8 @@ def _build_stage2_summary(
             "roi_data_path": str(r.roi_data_path) if r.roi_data_path else None,
             "bragg_vector_map_path": str(r.bragg_vector_map_path) if r.bragg_vector_map_path else None,
             "bragg_summary_path": str(r.bragg_summary_path) if r.bragg_summary_path else None,
+            "bragg_peaks_parquet_path": str(r.bragg_peaks_parquet_path) if r.bragg_peaks_parquet_path else None,
+            "bragg_qc": r.bragg_qc,
             "error": r.error,
         })
 
@@ -505,6 +507,52 @@ def _build_stage2_qc(result: Stage2Result) -> dict[str, Any]:
                 "zero_coverage_rois": [r.name for r in zero_cov_rois],
             },
         })
+
+    # --- Bragg peak QC flags --------------------------------------------------
+    for r in result.roi_results:
+        if r.error is not None or r.bragg_qc is None:
+            continue
+        bq = r.bragg_qc
+        if bq.get("forbidden_center_zone_fraction", 0.0) > 0.3:
+            flags.append({
+                "severity": "warning",
+                "code": "HIGH_CENTER_ZONE_PEAKS",
+                "message": (
+                    f"ROI '{r.name}' has {bq['forbidden_center_zone_fraction']:.1%} "
+                    f"peaks within the central beam zone — likely BF tail, not Bragg disks."
+                ),
+                "evidence": {"roi": r.name, "center_zone_fraction": bq["forbidden_center_zone_fraction"]},
+            })
+        if bq.get("edge_peak_fraction", 0.0) > 0.3:
+            flags.append({
+                "severity": "warning",
+                "code": "HIGH_EDGE_PEAKS",
+                "message": (
+                    f"ROI '{r.name}' has {bq['edge_peak_fraction']:.1%} "
+                    f"peaks near detector edges — possible edge artifacts."
+                ),
+                "evidence": {"roi": r.name, "edge_peak_fraction": bq["edge_peak_fraction"]},
+            })
+        if bq.get("duplicate_peak_fraction", 0.0) > 0.3:
+            flags.append({
+                "severity": "warning",
+                "code": "HIGH_DUPLICATE_PEAKS",
+                "message": (
+                    f"ROI '{r.name}' has {bq['duplicate_peak_fraction']:.1%} "
+                    f"peaks too close together (< minPeakSpacing) — possible splitting."
+                ),
+                "evidence": {"roi": r.name, "duplicate_peak_fraction": bq["duplicate_peak_fraction"]},
+            })
+        if (bq.get("beam_center_error_estimate") or 0.0) > 5.0:
+            flags.append({
+                "severity": "warning",
+                "code": "LARGE_BEAM_CENTER_ERROR",
+                "message": (
+                    f"ROI '{r.name}' peak centroid is {bq['beam_center_error_estimate']:.1f} px "
+                    f"from the nominal beam centre — centre may be miscalibrated."
+                ),
+                "evidence": {"roi": r.name, "beam_center_error_px": bq["beam_center_error_estimate"]},
+            })
 
     n_critical = sum(1 for f in flags if f.get("severity") == "critical")
     n_warnings = sum(1 for f in flags if f.get("severity") == "warning")

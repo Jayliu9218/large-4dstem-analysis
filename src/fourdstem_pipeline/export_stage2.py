@@ -228,6 +228,50 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
 
         lines.append("")
 
+    # --- Bragg Peak QC ----------------------------------------------------
+    roi_with_qc = [
+        r for r in roi_results
+        if not r.get("error") and r.get("bragg_qc") is not None
+    ]
+    if roi_with_qc:
+        lines.extend([
+            "## Bragg Peak QC",
+            "",
+            "Per-ROI diagnostics for detected Bragg peak quality.  High fractions",
+            "in the centre zone, edge, or duplicate columns suggest the Bragg",
+            "detection may be picking up non-diffraction signals (central beam",
+            "tail, edge artifacts, hot pixels, or peak splitting).",
+            "",
+            "| ROI | Peaks | Mean Int | Centre Zone | Edge | Duplicates | R Mean | R Std | BC Err |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ])
+        for r in roi_with_qc:
+            bq = r.get("bragg_qc", {})
+            r_mean = _fmt_optional_float(bq.get("radial_distance_mean"))
+            r_std = _fmt_optional_float(bq.get("radial_distance_std"))
+            bc_err = _fmt_optional_float(bq.get("beam_center_error_estimate"))
+            mean_int = bq.get("mean_peak_intensity", 0)
+            lines.append(
+                f"| `{r.get('name', '?')}` "
+                f"| {bq.get('peak_pixel_count', 0)} "
+                f"| {mean_int:.1f} "
+                f"| {bq.get('forbidden_center_zone_fraction', 0):.1%} "
+                f"| {bq.get('edge_peak_fraction', 0):.1%} "
+                f"| {bq.get('duplicate_peak_fraction', 0):.1%} "
+                f"| {r_mean} "
+                f"| {r_std} "
+                f"| {bc_err} |"
+            )
+        lines.append("")
+        lines.append(
+            "- **Centre Zone**: fraction of peak pixels within 5 px of beam centre "
+            "(likely BF tail). **Edge**: fraction near detector boundary. "
+            "**Duplicates**: fraction with a neighbour within `minPeakSpacing` px. "
+            "**R Mean/Std**: radial distance mean ± std. "
+            "**BC Err**: offset between peak centroid and nominal beam centre (px)."
+        )
+        lines.append("")
+
     # --- Indexing candidates ---------------------------------------------
     ready = [r for r in roi_results if is_roi_ready_for_indexing(r)]
     not_ready = [r for r in roi_results if not r.get("error") and not is_roi_ready_for_indexing(r)]
@@ -515,3 +559,10 @@ def _fmt_frac(value: float | None) -> str:
     if value is None:
         return "-"
     return f"{value:.1%}"
+
+
+def _fmt_optional_float(value: float | None) -> str:
+    """Format an optional float, returning '-' for None."""
+    if value is None:
+        return "-"
+    return f"{value:.1f}"

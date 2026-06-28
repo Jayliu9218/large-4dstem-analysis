@@ -43,19 +43,29 @@ class IndexingCandidate:
 
 @dataclass(frozen=True)
 class ROIIndexingResult:
-    """Indexing contract result for one Stage 2A ROI."""
+    """Indexing contract result for one Stage 2A ROI.
+
+    Conservative naming: fields use ``candidate`` / ``match`` / ``orientation_candidate``
+    to reflect that template correlation is a screening signal, not a crystallographic
+    phase identification.  Only full multi-condition validation (future Stage 2C) can
+    assign a definitive phase.
+    """
 
     name: str
     status: str
     stage2a_bragg_summary_path: str | None
     n_bragg_peaks: int
-    best_candidate: str | None
-    phase_score: float | None
-    orientation_score: float | None
-    match_quality: str
-    best_orientation_deg: float | None = None
-    template_score: float | None = None
+    candidate_phase: str | None = None
+    match_score: float | None = None
+    match_quality: str = "not_scored"
+    orientation_candidate_deg: float | None = None
     scoring_mode: str = "not_scored"
+    best_zone_axis: list[float] | None = None
+    score_margin: float | None = None
+    phase_confidence: str = "not_scored"
+    second_best_candidate: str | None = None
+    second_best_zone_axis: list[float] | None = None
+    second_best_score: float | None = None
 
 
 def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
@@ -99,7 +109,7 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
 
     any_template = any(c.template_count > 0 for c in candidates)
     summary = {
-        "schema_version": "stage2b-indexing-v1",
+        "schema_version": "stage2b-indexing-v2",
         "stage": "2B",
         "status": _stage2b_status(accepted_rois, candidates),
         "stage2a": {
@@ -136,13 +146,17 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
                 "status": r.status,
                 "stage2a_bragg_summary_path": r.stage2a_bragg_summary_path,
                 "n_bragg_peaks": r.n_bragg_peaks,
-                "best_candidate": r.best_candidate,
-                "phase_score": r.phase_score,
-                "orientation_score": r.orientation_score,
+                "candidate_phase": r.candidate_phase,
+                "match_score": r.match_score,
                 "match_quality": r.match_quality,
-                "best_orientation_deg": r.best_orientation_deg,
-                "template_score": r.template_score,
+                "orientation_candidate_deg": r.orientation_candidate_deg,
                 "scoring_mode": r.scoring_mode,
+                "best_zone_axis": r.best_zone_axis,
+                "score_margin": r.score_margin,
+                "phase_confidence": r.phase_confidence,
+                "second_best_candidate": r.second_best_candidate,
+                "second_best_zone_axis": r.second_best_zone_axis,
+                "second_best_score": r.second_best_score,
             }
             for r in roi_results
         ],
@@ -150,6 +164,10 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
             "Stage 2B uses analytic kinematic CIF templates when lattice parameters are available.",
             "Scores are normalized template correlations on ROI mean diffraction patterns.",
             "Full structure-factor intensities and py4DSTEM/pyxem backend adapters are future extensions.",
+            "Schema v2: field renames — best_candidate→candidate_phase, phase_score→match_score, "
+            "best_orientation_deg→orientation_candidate_deg. Removed: orientation_score, template_score "
+            "(consolidated into match_score). New: best_zone_axis, score_margin, phase_confidence, "
+            "second_best_candidate, second_best_zone_axis, second_best_score.",
         ],
     }
     if not any_template:
@@ -219,17 +237,44 @@ def _generate_candidate_templates(
             continue
 
         try:
-            stack, metadata = _generate_kinematic_template_stack(
-                candidate.cell,
-                sig_shape=sig_shape,
-                beam_center_yx=beam_center,
-                max_index=int(template_cfg["max_index"]),
-                orientations_deg=[float(v) for v in template_cfg["orientations_deg"]],
-                zone_axis=tuple(float(v) for v in template_cfg["zone_axis"]),
-                peak_sigma_px=float(template_cfg["peak_sigma_px"]),
-                reciprocal_pixels_per_inv_angstrom=template_cfg["reciprocal_pixels_per_inv_angstrom"],
-                intensity_power=float(template_cfg["intensity_power"]),
-            )
+            all_stacks: list[np.ndarray] = []
+            all_orientations: list[float] = []
+            zone_axis_index: list[int] = []
+            per_zone_metadata: list[dict[str, Any]] = []
+
+            for zi, zone_axis in enumerate(template_cfg["zone_axes"]):
+                stack, meta = _generate_kinematic_template_stack(
+                    candidate.cell,
+                    sig_shape=sig_shape,
+                    beam_center_yx=beam_center,
+                    max_index=int(template_cfg["max_index"]),
+                    orientations_deg=[float(v) for v in template_cfg["orientations_deg"]],
+                    zone_axis=tuple(float(v) for v in zone_axis),
+                    peak_sigma_px=float(template_cfg["peak_sigma_px"]),
+                    reciprocal_pixels_per_inv_angstrom=template_cfg["reciprocal_pixels_per_inv_angstrom"],
+                    intensity_power=float(template_cfg["intensity_power"]),
+                )
+                all_stacks.append(stack)
+                all_orientations.extend(meta["orientations_deg"])
+                zone_axis_index.extend([zi] * len(meta["orientations_deg"]))
+                per_zone_metadata.append(meta)
+
+            combined_stack = np.concatenate(all_stacks, axis=0)
+            metadata: dict[str, Any] = {
+                "cell": per_zone_metadata[0]["cell"],
+                "max_index": per_zone_metadata[0]["max_index"],
+                "hkl_count_total": int(sum(m["hkl_count"] for m in per_zone_metadata)),
+                "orientations_deg": all_orientations,
+                "zone_axes": template_cfg["zone_axes"],
+                "zone_axis_index": zone_axis_index,
+                "projections": [m["projection"] for m in per_zone_metadata],
+                "sig_shape": per_zone_metadata[0]["sig_shape"],
+                "beam_center_yx": per_zone_metadata[0]["beam_center_yx"],
+                "peak_sigma_px": per_zone_metadata[0]["peak_sigma_px"],
+                "reciprocal_pixels_per_inv_angstrom": per_zone_metadata[0]["reciprocal_pixels_per_inv_angstrom"],
+                "reciprocal_scale_source": per_zone_metadata[0]["reciprocal_scale_source"],
+                "intensity_power": per_zone_metadata[0]["intensity_power"],
+            }
         except ValueError as exc:
             log.warning("Could not generate templates for %s: %s", candidate.name, exc)
             result.append(candidate)
@@ -237,7 +282,7 @@ def _generate_candidate_templates(
 
         stack_path = template_dir / f"{candidate.name}_template_stack.npy"
         metadata_path = template_dir / f"{candidate.name}_template_metadata.json"
-        np.save(stack_path, stack.astype(np.float32))
+        np.save(stack_path, combined_stack.astype(np.float32))
         metadata.update({
             "candidate": candidate.name,
             "phase": candidate.phase,
@@ -257,7 +302,7 @@ def _generate_candidate_templates(
                 cell=candidate.cell,
                 template_stack_path=stack_path,
                 template_metadata_path=metadata_path,
-                template_count=int(stack.shape[0]),
+                template_count=int(combined_stack.shape[0]),
                 scoring_mode="template_match",
             )
         )
@@ -296,7 +341,7 @@ def _template_match_roi(
     if pattern_vec is None:
         return None
 
-    best: dict[str, Any] | None = None
+    all_hits: list[dict[str, Any]] = []
     for candidate in candidates:
         if candidate.template_stack_path is None or candidate.template_metadata_path is None:
             continue
@@ -314,23 +359,33 @@ def _template_match_roi(
         if not normalized:
             continue
         template_vecs = np.vstack(normalized)
-        scores = template_vecs @ pattern_vec
-        idx = int(np.argmax(scores))
-        score = float(scores[idx])
-        if best is None or score > best["score"]:
-            orientations = metadata.get("orientations_deg", [])
-            best = {
+        scores = template_vecs @ pattern_vec  # shape (n_templates,)
+
+        orientations = metadata.get("orientations_deg", [])
+        zone_axis_index = metadata.get("zone_axis_index", [0] * len(orientations))
+        zone_axes = metadata.get("zone_axes", [[0.0, 0.0, 1.0]])
+
+        for i, score in enumerate(scores):
+            zi = int(zone_axis_index[i]) if i < len(zone_axis_index) else 0
+            za = zone_axes[zi] if zi < len(zone_axes) else [0.0, 0.0, 1.0]
+            all_hits.append({
                 "candidate": candidate,
-                "score": score,
-                "orientation_deg": float(orientations[idx]) if idx < len(orientations) else None,
+                "score": float(score),
+                "zone_axis": [float(v) for v in za],
+                "zone_axis_idx": zi,
+                "orientation_deg": float(orientations[i]) if i < len(orientations) else None,
+                "template_idx": i,
+                "stack": stack,
                 "all_scores": [float(s) for s in scores],
                 "orientations_deg": orientations,
-                "best_template_idx": idx,
-                "stack": stack,
-            }
+            })
 
-    if best is None:
+    if not all_hits:
         return None
+
+    all_hits.sort(key=lambda x: x["score"], reverse=True)
+    best = all_hits[0]
+    second = all_hits[1] if len(all_hits) > 1 else None
 
     # --- Save visualisations ------------------------------------------------
     _save_match_visuals(
@@ -340,18 +395,26 @@ def _template_match_roi(
         best,
     )
 
-    score = round(float(best["score"]), 4)
+    match_score = round(float(best["score"]), 4)
+    second_best_score = round(float(second["score"]), 4) if second else None
+    score_margin = round(match_score - second_best_score, 4) if second_best_score is not None else None
+    phase_conf = _phase_confidence(match_score, score_margin)
+
     return ROIIndexingResult(
         name=str(roi.get("name", "unknown")),
         status="TEMPLATE_MATCHED",
         stage2a_bragg_summary_path=roi.get("bragg_summary_path"),
         n_bragg_peaks=n_bragg_peaks,
-        best_candidate=best["candidate"].name,
-        phase_score=score,
-        orientation_score=score,
-        match_quality=_template_quality(score),
-        best_orientation_deg=best["orientation_deg"],
-        template_score=score,
+        candidate_phase=best["candidate"].name,
+        match_score=match_score,
+        match_quality=_template_quality(match_score),
+        orientation_candidate_deg=best["orientation_deg"],
+        best_zone_axis=best["zone_axis"],
+        score_margin=score_margin,
+        phase_confidence=phase_conf,
+        second_best_candidate=second["candidate"].name if second else None,
+        second_best_zone_axis=second["zone_axis"] if second else None,
+        second_best_score=second_best_score,
         scoring_mode="template_match",
     )
 
@@ -377,7 +440,7 @@ def _save_match_visuals(
 
     try:
         # Best template image
-        best_template = best["stack"][best["best_template_idx"]]
+        best_template = best["stack"][best["template_idx"]]
         save_png(roi_dir / "template_best_match.png", best_template)
 
         # Overlay: mean DP (gray) + template (green)
@@ -435,9 +498,8 @@ def _mock_score_roi_against_candidates(
             status="PENDING_TEMPLATE_MATCHING",
             stage2a_bragg_summary_path=roi.get("bragg_summary_path"),
             n_bragg_peaks=n_bragg_peaks,
-            best_candidate=None,
-            phase_score=None,
-            orientation_score=None,
+            candidate_phase=None,
+            match_score=None,
             match_quality="not_scored",
             scoring_mode="not_scored",
         )
@@ -447,9 +509,8 @@ def _mock_score_roi_against_candidates(
         status="MOCK_SCORED",
         stage2a_bragg_summary_path=roi.get("bragg_summary_path"),
         n_bragg_peaks=n_bragg_peaks,
-        best_candidate=best_candidate.name,
-        phase_score=best_score,
-        orientation_score=None,
+        candidate_phase=best_candidate.name,
+        match_score=best_score,
         match_quality="mock_scored",
         scoring_mode="mock_peak_count",
     )
@@ -468,7 +529,7 @@ def _template_config(raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "max_index": int(raw.get("max_index", 4)),
         "orientations_deg": orientations,
-        "zone_axis": _parse_zone_axis(raw.get("zone_axis", [0, 0, 1])),
+        "zone_axes": _parse_zone_axes(raw),
         "peak_sigma_px": float(raw.get("peak_sigma_px", 5.0)),
         "reciprocal_pixels_per_inv_angstrom": (
             None if raw.get("reciprocal_pixels_per_inv_angstrom") is None
@@ -485,6 +546,23 @@ def _parse_zone_axis(value: Any) -> list[float]:
     if float(np.linalg.norm(axis)) <= 1e-12:
         raise ValueError("template_generation.zone_axis must be non-zero.")
     return axis
+
+
+def _parse_zone_axes(raw: dict[str, Any]) -> list[list[float]]:
+    """Parse ``zone_axes`` (plural) with backward compat for ``zone_axis`` (singular).
+
+    Precedence: ``zone_axes`` > ``zone_axis`` > default ``[[0, 0, 1]]``.
+    Always returns a list of zone-axis triplets.
+    """
+    if "zone_axes" in raw and raw["zone_axes"] is not None:
+        axes = [_parse_zone_axis(z) for z in raw["zone_axes"]]
+    elif "zone_axis" in raw and raw["zone_axis"] is not None:
+        axes = [_parse_zone_axis(raw["zone_axis"])]
+    else:
+        axes = [_parse_zone_axis([0, 0, 1])]
+    if not axes:
+        raise ValueError("zone_axes must contain at least one zone axis.")
+    return axes
 
 
 def _stage2_geometry(stage2a_summary: dict[str, Any], *, required: bool = True) -> dict[str, Any] | None:
@@ -769,6 +847,29 @@ def _template_quality(score: float) -> str:
     if score >= 0.7:
         return "high"
     if score >= 0.4:
+        return "medium"
+    return "low"
+
+
+def _phase_confidence(best_score: float, score_margin: float | None) -> str:
+    """Per-ROI phase confidence from template matching results.
+
+    Parameters
+    ----------
+    best_score:
+        Maximum correlation across all candidates × zone axes.
+    score_margin:
+        ``best_score - second_best_score``, or *None* if only one hit exists.
+
+    Returns
+    -------
+    ``"high"``, ``"medium"``, or ``"low"``
+    """
+    if score_margin is None:
+        return "low"
+    if best_score > 0.60 and score_margin > 0.15:
+        return "high"
+    if best_score > 0.40 and score_margin > 0.08:
         return "medium"
     return "low"
 

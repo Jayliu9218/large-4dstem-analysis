@@ -29,6 +29,8 @@ large-data = [
 ]
 diffraction = [
     "py4DSTEM @ git+https://github.com/py4dstem/py4DSTEM.git@dev",
+    "pandas>=2",
+    "pyarrow>=14",
 ]
 test = [
     "pytest>=8",

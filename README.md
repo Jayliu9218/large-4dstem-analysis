@@ -1,21 +1,27 @@
 # large-4dstem-analysis
 
 End-to-end 4D-STEM analysis pipeline for large datasets: from raw data loading
-through unsupervised phase screening to crystallographic indexing.  Three-stage
-design with validated data contracts between stages.
+through unsupervised fingerprint-class screening to crystallographic phase
+assignment.  Three-stage design with validated data contracts between stages.
+
+> **Terminology note:** Stage 1 produces *unsupervised diffraction fingerprint
+> classes* — not crystallographic phase assignments.  Radial profiles can
+> separate thickness, orientation, strain, amorphous/crystalline contrast,
+> detector artifacts, and phase changes all at once.  A cluster is a
+> contrast group; only Stages 2B/2C assign crystallographic phases.
 
 **What you get:**
 - **Stage 1** — Virtual images, radial fingerprints, unsupervised fingerprint
-  classes, orientation preview, sample mask, ROI candidates, QC diagnostics,
-  markdown + HTML report with ~40 PNG visualisations.
+  classes (phase-candidate screening), orientation preview, sample mask, ROI
+  candidates, QC diagnostics, markdown + HTML report with ~40 PNG visualisations.
 - **Stage 2A** — Per-ROI Bragg disk detection via py4DSTEM with coordinate
   mapping, beam-centre calibration, cluster/background validation, per-ROI
   visualisations, and a human-readable report labelling which ROIs are ready
   for indexing.
 - **Stage 2B** — Analytic kinematic template generation from CIF lattice
   parameters, in-plane orientation matching against ROI mean diffraction
-  patterns, template-score and correlation-vs-angle visualisations, and a
-  stage-level indexing summary.
+  patterns (crystallographic phase assignment), template-score and
+  correlation-vs-angle visualisations, and a stage-level indexing summary.
 
 **Real-data verification** (Ti, 512×512×256×256 detector, 34 GB MIB):
 | Stage | Output | Result |
@@ -67,7 +73,7 @@ python -m pytest tests/ -v
 
 ## Three-Stage Workflow
 
-### Stage 1 — Screening & Fingerprint Classes
+### Stage 1 — Fingerprint-Class Screening (Phase-Candidate Screening)
 
 ```
 python -m fourdstem_pipeline.cli run --config configs/0617_4d_stage1_enhanced.yaml
@@ -79,7 +85,7 @@ python -m fourdstem_pipeline.cli run --config configs/0617_4d_stage1_enhanced.ya
 3. Computes virtual images: BF, ADF, HAADF, COM-x, COM-y, ring images
 4. Generates sample mask (percentile threshold + morphological cleaning)
 5. Computes radial fingerprints (per-pixel radial intensity profiles)
-6. Runs unsupervised phase screening (PCA + NMF + KMeans clustering)
+6. Runs unsupervised fingerprint-class screening (PCA + NMF + KMeans clustering)
 7. Runs orientation preview (low-resolution template-free COM-angle proxy)
 8. Generates ROI candidates from: connected components, cluster boundaries,
    orientation-score extremes, intensity anomalies
@@ -94,7 +100,7 @@ python -m fourdstem_pipeline.cli run --config configs/0617_4d_stage1_enhanced.ya
 | `qc_summary.json` | QC flags and PASS/FAIL verdict |
 | `virtual/virtual_images.npz` | BF, ADF, HAADF, ring, COM maps |
 | `fingerprints/radial_fingerprints.npy` | Per-pixel radial profiles |
-| `fingerprint_classes/fingerprint_class_labels.npy` | Unsupervised class labels |
+| `fingerprint_classes/fingerprint_class_labels.npy` | Unsupervised fingerprint-class labels (NOT crystallographic phases) |
 | `roi_candidates/roi_candidates.yaml` | ROI proposals with bboxes and rationale |
 | `orientation/orientation_index.npy` | Per-pixel orientation label |
 | `png/` | ~40 diagnostic PNGs |
@@ -115,10 +121,12 @@ python -m fourdstem_pipeline.cli stage2 --config configs/stage2_roi_bragg.yaml
 5. Extracts per-ROI 4D sub-cubes with navigation thinning (`thin_r`)
 6. Runs py4DSTEM `find_Bragg_disks()` on each ROI with detector binning (`bin_q`)
 7. Records beam centre provenance (Stage 1 COM → py4DSTEM calibration → fallback)
-8. Validates each ROI against fingerprint labels (background fraction) and sample mask
-9. Produces per-ROI visualisations: mean DP, Bragg vector map, Bragg overlay
-10. Generates `stage2_report.md`/`.html` with indexing-ready verdicts
-11. Generates `stage2_benchmark.json` with per-ROI timing and data sizes
+8. Saves per-ROI tabular Bragg peaks as `bragg_peaks.parquet` (scan_y, scan_x, qy, qx, intensity, snr)
+9. Computes Bragg peak QC metrics (centre-zone, edge, duplicate fractions, radial stats)
+10. Validates each ROI against fingerprint labels (background fraction) and sample mask
+11. Produces per-ROI visualisations: mean DP, Bragg vector map, Bragg overlay, radius histogram
+12. Generates `stage2_report.md`/`.html` with indexing-ready verdicts and Bragg QC table
+13. Generates `stage2_benchmark.json` with per-ROI timing and data sizes
 
 **Key outputs:**
 | File | Content |
@@ -132,6 +140,8 @@ python -m fourdstem_pipeline.cli stage2 --config configs/stage2_roi_bragg.yaml
 | `roi_<name>/bragg_summary.json` | Full per-ROI metadata |
 | `roi_<name>/mean_dp.png` | Log-scale mean diffraction pattern |
 | `roi_<name>/bragg_vector_map.png` | Bragg peak histogram |
+| `roi_<name>/bragg_peaks.parquet` | Tabular Bragg peaks: scan_y, scan_x, qy, qx, intensity, snr |
+| `roi_<name>/bragg_peak_radius_histogram.png` | Radial distance histogram for QC |
 | `roi_<name>/bragg_overlay.png` | Mean DP + Bragg peaks (green crosses) |
 
 **Configurable parameters:**
@@ -153,21 +163,25 @@ python -m fourdstem_pipeline.cli stage2b --config configs/stage2_indexing.yaml
 1. Reads Stage 2A `stage2_summary.json` and filters ROIs via `is_roi_ready_for_indexing()`
 2. Parses CIF files for lattice parameters (`_cell_length_*`, `_cell_angle_*`)
 3. Generates kinematic template stacks from the reciprocal lattice:
-   - Single-zone-axis orthographic projection (configurable `zone_axis`)
+   - Multi-zone-axis orthographic projection (configurable `zone_axes`, or `zone_axis` for single-zone backward compat)
    - In-plane orientation sweep (configurable `orientation_step_deg`)
    - Gaussian spot rendering (`peak_sigma_px` controls disk width)
    - Intensity ≈ `1/|q|^power` kinematic proxy
 4. Matches ROI mean diffraction patterns against all candidate templates
-   via normalized correlation
-5. Saves per-candidate template stacks and metadata to `templates/`
-6. Produces per-ROI visualisations: best template, template+DP overlay,
+   via normalized correlation, tracking the best (candidate, zone axis, in-plane angle) triplet
+5. Computes per-ROI phase confidence (high/medium/low) from the best score and
+   its margin over the second-best candidate
+6. Saves per-candidate template stacks and metadata to `templates/`
+7. Produces per-ROI visualisations: best template, template+DP overlay,
    correlation-vs-angle bar chart
-7. Writes `stage2_indexing_summary.json` with geometry, scores, and match quality
+8. Writes `stage2_indexing_summary.json` (schema v2) with conservative field
+   names: `candidate_phase`, `match_score`, `orientation_candidate_deg`,
+   `phase_confidence`, `best_zone_axis`, `score_margin`
 
 **Key outputs:**
 | File | Content |
 |------|---------|
-| `stage2_indexing_summary.json` | Best candidate, score, orientation, match quality |
+| `stage2_indexing_summary.json` | Candidate phase, match score, zone axis, phase confidence, match quality (schema v2) |
 | `templates/<candidate>_template_stack.npy` | Full orientation template stack (float32) |
 | `templates/<candidate>_template_metadata.json` | Cell, HKL list, projection mode, beam centre |
 | `roi_<name>/template_best_match.png` | Best-matching template image |
@@ -176,7 +190,8 @@ python -m fourdstem_pipeline.cli stage2b --config configs/stage2_indexing.yaml
 
 **Configurable parameters:**
 - `max_index` — maximum HKL index for reciprocal spot generation (default 4)
-- `zone_axis` — reciprocal-space direction for orthographic projection (default `[0,0,1]`)
+- `zone_axes` — list of zone axes for multi-zone template generation (e.g. `[[0,0,1],[1,0,0]]`). Overrides `zone_axis`.
+- `zone_axis` — single zone axis for backward compat. Equivalent to `zone_axes: [[0,0,1]]`.
 - `orientation_step_deg` — in-plane rotation step (default 5°)
 - `peak_sigma_px` — Gaussian spot width in pixels (default 5.0, tuned for CBED)
 - `reciprocal_pixels_per_inv_angstrom` — calibrated scale, or null for auto-fit
@@ -191,7 +206,7 @@ python -m fourdstem_pipeline.cli stage2b --config configs/stage2_indexing.yaml
 | `fourdstem-run` | `python -m fourdstem_pipeline.cli run` | Stage 1 screening |
 | `fourdstem-dry-run` | `python -m fourdstem_pipeline.cli dry_run` | Pre-flight config validation |
 | `fourdstem-stage2` | `python -m fourdstem_pipeline.cli stage2` | Stage 2A ROI Bragg detection |
-| `fourdstem-stage2b` | `python -m fourdstem_pipeline.cli stage2b` | Stage 2B indexing |
+| `fourdstem-stage2b` | `python -m fourdstem_pipeline.cli stage2b` | Stage 2B crystallographic candidate screening |
 
 All commands accept `--config <path>` and `--log-level DEBUG|INFO|WARNING|ERROR`.
 
@@ -243,11 +258,12 @@ virtual_images:
     adf:  {inner_radius: 10, outer_radius: 22}
     haadf:{inner_radius: 22, outer_radius: 31}
 
+# ── Fingerprint-class screening (unsupervised contrast groups; NOT crystallographic phases) ──
 phase_screening:
   n_components: 3
   n_clusters: 3
   method: pca_nmf_cluster
-  candidate_phases: []
+  candidate_phases: []              # Optional: score against reference profiles (phase-candidate screening)
 
 orientation:
   preview_binning: [2, 2]
@@ -295,7 +311,13 @@ output_dir: null                  # null = <stage2_dir>/stage2b_indexing/
 
 template_generation:
   max_index: 4
-  zone_axis: [0, 0, 1]
+  zone_axis: [0, 0, 1]           # backward compat; overridden by zone_axes if set
+  # zone_axes:                   # multi-zone mode (uncomment to enable)
+  #   - [0, 0, 1]
+  #   - [1, 0, 0]
+  #   - [1, 1, 0]
+  #   - [1, 1, 1]
+  #   - [1, 1, 2]
   orientation_step_deg: 5
   peak_sigma_px: 5.0
   reciprocal_pixels_per_inv_angstrom: null
@@ -341,11 +363,13 @@ outputs/<run>/
 │   ├── provenance.json
 │   └── roi_<name>/
 │       ├── roi_data.npy             # 4D sub-cube
-│       ├── bragg_vector_map.npy     # Bragg peaks
-│       ├── bragg_summary.json       # Full per-ROI metadata
+│       ├── bragg_peaks.parquet      # Tabular Bragg peaks (scan_y/x, qy/x, intensity, snr)
+│       ├── bragg_vector_map.npy     # Bragg peak vote histogram
+│       ├── bragg_summary.json       # Full per-ROI metadata (incl. Bragg QC)
 │       ├── mean_dp.png              # Log-scale mean DP
 │       ├── bragg_vector_map.png     # Bragg peak histogram
 │       ├── bragg_overlay.png        # Mean DP + Bragg peaks
+│       ├── bragg_peak_radius_histogram.png  # Radial distance histogram
 │       ├── template_best_match.png  # (from Stage 2B)
 │       ├── template_match_overlay.png
 │       └── correlation_vs_angle.png
@@ -421,9 +445,9 @@ Config:   0617_4d_stage1_enhanced.yaml (r_bin=2, q_crop=[16,240,16,240], q_bin=2
 | | | |
 | **2B** | Candidates | Ti-bcc (cubic, a=3.25 Å), Ti-hcp (hex, a=4.57 Å, c=2.83 Å) |
 | **2B** | Templates generated | 360 (180 per candidate, 2° step) |
-| **2B** | **Best candidate** | **Ti-bcc** |
-| **2B** | **Template score** | **0.433 (medium)** |
-| **2B** | **Best orientation** | **62.0°** |
+| **2B** | **Candidate phase** | **Ti-bcc** |
+| **2B** | **Match score** | **0.433 (medium)** |
+| **2B** | **Orientation candidate** | **62.0°** |
 | **2B** | Auto-scale | 57.7 px/Å (auto-fit to detector) |
 | **2B** | Elapsed | 8.2 s |
 
@@ -463,7 +487,7 @@ src/fourdstem_pipeline/
 ├── virtual.py              # BF/ADF/HAADF/COM/ring computation
 ├── masks.py                # annular mask generation
 ├── fingerprints.py         # radial fingerprint profiles
-├── phase.py                # PCA + NMF + KMeans phase screening
+├── phase.py                # PCA + NMF + KMeans fingerprint-class screening
 ├── orientation.py          # orientation preview (COM-angle proxy)
 ├── sample_mask.py          # sample/vacuum mask + label masking
 ├── diagnostics.py          # cluster diagnostics orchestration
@@ -489,7 +513,7 @@ src/fourdstem_pipeline/
 | Stage 2A per-ROI | `bragg_summary.json` | Both bboxes, beam centre, peaks, params, validation |
 | Stage 2A aggregate | `stage2_summary.json` | All ROI results + provenance |
 | Stage 2A → 2B gate | `is_roi_ready_for_indexing()` | Shared filter: peaks>0, bg≤50%, sample>0, beam calibrated |
-| Stage 2B output | `stage2_indexing_summary.json` | Best candidate, scores, orientations, match quality |
+| Stage 2B output | `stage2_indexing_summary.json` | Candidate phase, match score, zone axis, phase confidence, match quality (schema v2) |
 
 ---
 
@@ -530,7 +554,7 @@ Either set `data_path` in the Stage 2 config, or ensure the Stage 1 output's
 
 1. Verify `peak_sigma_px` matches your convergence angle (try 3–6 for CBED).
 2. Set `reciprocal_pixels_per_inv_angstrom` if you know the camera length.
-3. Try different `zone_axis` values — real grains may not be on `[0,0,1]`.
+3. Use `zone_axes` to try multiple zone axes — real grains may not be on `[0,0,1]`.
 4. Check that `beam_center_yx` in `bragg_summary.json` matches the detector shape.
 
 ### Binning truncation

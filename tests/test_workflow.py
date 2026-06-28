@@ -991,9 +991,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(summary["candidate_cifs"][0]["scoring_mode"], "mock_peak_count")
         self.assertEqual(summary["output_dir"], str(output_dir))
         self.assertEqual(summary["roi_results"][0]["name"], "roi_good")
-        self.assertEqual(summary["roi_results"][0]["best_candidate"], "candidate")
-        self.assertEqual(summary["roi_results"][0]["phase_score"], 1.0)
+        self.assertEqual(summary["schema_version"], "stage2b-indexing-v2")
+        self.assertEqual(summary["roi_results"][0]["candidate_phase"], "candidate")
+        self.assertEqual(summary["roi_results"][0]["match_score"], 1.0)
         self.assertEqual(summary["roi_results"][0]["match_quality"], "mock_scored")
+        self.assertEqual(summary["roi_results"][0]["phase_confidence"], "not_scored")
+        self.assertIsNone(summary["roi_results"][0]["second_best_candidate"])
+        self.assertIsNone(summary["roi_results"][0]["best_zone_axis"])
+        self.assertIsNone(summary["roi_results"][0]["score_margin"])
 
     def test_stage2b_generates_cif_templates_and_matches_roi(self):
         """Stage 2B generates analytic CIF templates and matches ROI mean DPs."""
@@ -1078,18 +1083,24 @@ class WorkflowTests(unittest.TestCase):
         roi_result = summary["roi_results"][0]
         candidate = summary["candidate_cifs"][0]
         self.assertEqual(summary["status"], "TEMPLATE_MATCHED")
+        self.assertEqual(summary["schema_version"], "stage2b-indexing-v2")
         self.assertEqual(candidate["scoring_mode"], "template_match")
         self.assertEqual(candidate["template_count"], 1)
         self.assertTrue(Path(candidate["template_stack_path"]).exists())
-        self.assertEqual(summary["template_generation"]["zone_axis"], [0.0, 0.0, 1.0])
+        self.assertEqual(summary["template_generation"]["zone_axes"], [[0.0, 0.0, 1.0]])
         metadata = json.loads(Path(candidate["template_metadata_path"]).read_text(encoding="utf-8"))
-        self.assertEqual(metadata["projection"]["mode"], "single_zone_axis_orthographic")
-        self.assertEqual(metadata["projection"]["zone_axis"], [0.0, 0.0, 1.0])
+        self.assertEqual(metadata["projections"][0]["mode"], "single_zone_axis_orthographic")
+        self.assertEqual(metadata["projections"][0]["zone_axis"], [0.0, 0.0, 1.0])
         self.assertEqual(roi_result["status"], "TEMPLATE_MATCHED")
-        self.assertEqual(roi_result["best_candidate"], "candidate")
-        self.assertGreater(roi_result["template_score"], 0.95)
+        self.assertEqual(roi_result["candidate_phase"], "candidate")
+        self.assertGreater(roi_result["match_score"], 0.95)
         self.assertEqual(roi_result["match_quality"], "high")
-        self.assertEqual(roi_result["best_orientation_deg"], 0.0)
+        self.assertEqual(roi_result["orientation_candidate_deg"], 0.0)
+        self.assertEqual(roi_result["best_zone_axis"], [0.0, 0.0, 1.0])
+        self.assertIn(roi_result["phase_confidence"], ("high", "medium", "low"))
+        # Single candidate → no second-best
+        self.assertIsNone(roi_result["second_best_candidate"])
+        self.assertIsNone(roi_result["score_margin"])
 
     def test_stage2b_missing_candidate_cif_records_null_hash(self):
         """Missing CIF provenance is non-fatal and records sha256 as null."""
@@ -1124,6 +1135,10 @@ class WorkflowTests(unittest.TestCase):
 
         self.assertIsNone(summary["candidate_cifs"][0]["sha256"])
         self.assertEqual(summary["roi_results"][0]["match_quality"], "not_scored")
+        self.assertEqual(summary["roi_results"][0]["phase_confidence"], "not_scored")
+        self.assertIsNone(summary["roi_results"][0]["match_score"])
+        self.assertIsNone(summary["roi_results"][0]["candidate_phase"])
+        self.assertEqual(summary["schema_version"], "stage2b-indexing-v2")
 
     def test_stage2b_cli_entrypoint(self):
         """Stage 2B is available through the CLI module and pyproject script."""
@@ -1165,10 +1180,207 @@ class WorkflowTests(unittest.TestCase):
             stage2b()
 
         self.assertIn("Stage 2B contract complete", stdout.getvalue())
-        self.assertTrue((self.output_dir / "stage2b_cli" / "stage2_indexing_summary.json").exists())
+        summary_path = self.output_dir / "stage2b_cli" / "stage2_indexing_summary.json"
+        self.assertTrue(summary_path.exists())
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        self.assertEqual(summary["schema_version"], "stage2b-indexing-v2")
         pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('fourdstem-stage2b = "fourdstem_pipeline.cli:stage2b"', pyproject)
 
+
+    # ------------------------------------------------------------------
+    # Stage 2B: multi-zone-axis template matching
+    # ------------------------------------------------------------------
+
+    def test_stage2b_multi_zone_axis_template_matching(self):
+        """Multi-zone-axis config generates concatenated templates with zone_axis_index."""
+        from fourdstem_pipeline.indexing import run_stage2_indexing
+
+        stage2_dir = self.output_dir / "stage2a_mz"
+        roi_dir = stage2_dir / "roi_good"
+        roi_dir.mkdir(parents=True)
+        cif_path = self.output_dir / "candidate_mz.cif"
+        cif_path.write_text(
+            "data_candidate\n"
+            "_cell_length_a 2.0\n"
+            "_cell_length_b 2.0\n"
+            "_cell_length_c 2.0\n"
+            "_cell_angle_alpha 90\n"
+            "_cell_angle_beta 90\n"
+            "_cell_angle_gamma 90\n",
+            encoding="utf-8",
+        )
+        # Create a small template to use as ROI data (ensures perfect correlation)
+        from fourdstem_pipeline.indexing import _generate_kinematic_template_stack
+        stack_z0, _ = _generate_kinematic_template_stack(
+            {"a": 2.0, "b": 2.0, "c": 2.0, "alpha": 90.0, "beta": 90.0, "gamma": 90.0},
+            sig_shape=(32, 32), beam_center_yx=(16.0, 16.0),
+            max_index=1, orientations_deg=[0.0],
+            zone_axis=(0.0, 0.0, 1.0),
+            peak_sigma_px=1.0, reciprocal_pixels_per_inv_angstrom=8.0,
+            intensity_power=2.0,
+        )
+        roi_data_path = roi_dir / "roi_data.npy"
+        np.save(roi_data_path, stack_z0[0][None, None, :, :].astype(np.float32))
+        (stage2_dir / "stage2_summary.json").write_text(
+            json.dumps({
+                "run_name": "mz_stage2a",
+                "manifest": {"sig_shape": [32, 32]},
+                "roi_results": [{
+                    "name": "roi_good", "error": None, "n_bragg_peaks": 8,
+                    "background_fraction": 0.0, "sample_mask_coverage": 1.0,
+                    "beam_center_source": "stage1_com",
+                    "beam_center_yx": [16.0, 16.0], "sig_shape": [32, 32],
+                    "roi_data_path": str(roi_data_path),
+                    "bragg_summary_path": str(roi_dir / "bragg_summary.json"),
+                }],
+            }),
+            encoding="utf-8",
+        )
+
+        output_dir = self.output_dir / "stage2b_mz"
+        summary = run_stage2_indexing({
+            "stage2_dir": str(stage2_dir),
+            "output_dir": str(output_dir),
+            "template_generation": {
+                "max_index": 1,
+                "zone_axes": [[0, 0, 1], [1, 0, 0]],
+                "orientations_deg": [0.0],
+                "peak_sigma_px": 1.0,
+                "reciprocal_pixels_per_inv_angstrom": 8.0,
+                "intensity_power": 2.0,
+            },
+            "candidate_cifs": [
+                {"name": "candidate", "phase": "cubic", "path": str(cif_path)}
+            ],
+        })
+
+        candidate = summary["candidate_cifs"][0]
+        # 2 zone axes × 1 orientation = 2 templates
+        self.assertEqual(candidate["template_count"], 2)
+        metadata = json.loads(Path(candidate["template_metadata_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(metadata["zone_axis_index"], [0, 1])
+        self.assertEqual(len(metadata["projections"]), 2)
+        self.assertEqual(metadata["zone_axes"], [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]])
+        roi_result = summary["roi_results"][0]
+        self.assertEqual(roi_result["status"], "TEMPLATE_MATCHED")
+        self.assertEqual(roi_result["best_zone_axis"], [0.0, 0.0, 1.0])
+
+    def test_stage2b_phase_confidence_thresholds(self):
+        """phase_confidence correctly classifies score/margin pairs."""
+        from fourdstem_pipeline.indexing import _phase_confidence
+
+        # High: score > 0.60 AND margin > 0.15
+        self.assertEqual(_phase_confidence(0.61, 0.16), "high")
+        self.assertEqual(_phase_confidence(0.80, 0.20), "high")
+        # Medium: score > 0.40 AND margin > 0.08 (but not high)
+        self.assertEqual(_phase_confidence(0.61, 0.14), "medium")   # margin too low for high
+        self.assertEqual(_phase_confidence(0.59, 0.20), "medium")   # score too low for high
+        self.assertEqual(_phase_confidence(0.41, 0.09), "medium")   # just above thresholds
+        # Low: everything else
+        self.assertEqual(_phase_confidence(0.41, 0.07), "low")       # margin too low
+        self.assertEqual(_phase_confidence(0.39, 0.20), "low")       # score too low
+        self.assertEqual(_phase_confidence(0.20, 0.05), "low")       # both too low
+        # No second-best → low
+        self.assertEqual(_phase_confidence(0.90, None), "low")
+
+    def test_stage2b_phase_confidence_end_to_end(self):
+        """End-to-end: phase_confidence is 'high' when best>>second and 'low' when close."""
+        from fourdstem_pipeline.indexing import (
+            _generate_kinematic_template_stack,
+            run_stage2_indexing,
+        )
+
+        stage2_dir = self.output_dir / "stage2a_pc"
+        roi_dir = stage2_dir / "roi_good"
+        roi_dir.mkdir(parents=True)
+
+        # Candidate A: cubic cell — will match well
+        cif_a = self.output_dir / "cand_a.cif"
+        cif_a.write_text(
+            "data_A\n_cell_length_a 2.0\n_cell_length_b 2.0\n_cell_length_c 2.0\n"
+            "_cell_angle_alpha 90\n_cell_angle_beta 90\n_cell_angle_gamma 90\n",
+            encoding="utf-8",
+        )
+        # Candidate B: different cell — will match poorly
+        cif_b = self.output_dir / "cand_b.cif"
+        cif_b.write_text(
+            "data_B\n_cell_length_a 5.0\n_cell_length_b 5.0\n_cell_length_c 5.0\n"
+            "_cell_angle_alpha 90\n_cell_angle_beta 90\n_cell_angle_gamma 90\n",
+            encoding="utf-8",
+        )
+
+        # Use candidate A's template as the ROI signal
+        stack_a, _ = _generate_kinematic_template_stack(
+            {"a": 2.0, "b": 2.0, "c": 2.0, "alpha": 90.0, "beta": 90.0, "gamma": 90.0},
+            sig_shape=(32, 32), beam_center_yx=(16.0, 16.0),
+            max_index=1, orientations_deg=[0.0],
+            zone_axis=(0.0, 0.0, 1.0),
+            peak_sigma_px=1.0, reciprocal_pixels_per_inv_angstrom=8.0,
+            intensity_power=2.0,
+        )
+        roi_data_path = roi_dir / "roi_data.npy"
+        np.save(roi_data_path, stack_a[0][None, None, :, :].astype(np.float32))
+        (stage2_dir / "stage2_summary.json").write_text(
+            json.dumps({
+                "run_name": "pc_stage2a",
+                "manifest": {"sig_shape": [32, 32]},
+                "roi_results": [{
+                    "name": "roi_good", "error": None, "n_bragg_peaks": 8,
+                    "background_fraction": 0.0, "sample_mask_coverage": 1.0,
+                    "beam_center_source": "stage1_com",
+                    "beam_center_yx": [16.0, 16.0], "sig_shape": [32, 32],
+                    "roi_data_path": str(roi_data_path),
+                    "bragg_summary_path": str(roi_dir / "bragg_summary.json"),
+                }],
+            }),
+            encoding="utf-8",
+        )
+
+        output_dir = self.output_dir / "stage2b_pc"
+        summary = run_stage2_indexing({
+            "stage2_dir": str(stage2_dir),
+            "output_dir": str(output_dir),
+            "template_generation": {
+                "max_index": 1,
+                "zone_axis": [0, 0, 1],
+                "orientations_deg": [0.0],
+                "peak_sigma_px": 1.0,
+                "reciprocal_pixels_per_inv_angstrom": 8.0,
+                "intensity_power": 2.0,
+            },
+            "candidate_cifs": [
+                {"name": "cand_a", "phase": "cubic_2A", "path": str(cif_a)},
+                {"name": "cand_b", "phase": "cubic_5A", "path": str(cif_b)},
+            ],
+        })
+
+        roi_result = summary["roi_results"][0]
+        self.assertEqual(roi_result["candidate_phase"], "cand_a")
+        self.assertGreater(roi_result["match_score"], 0.95)
+        # Candidate A should win by a large margin → high confidence
+        self.assertEqual(roi_result["phase_confidence"], "high")
+        self.assertIsNotNone(roi_result["score_margin"])
+        self.assertGreater(roi_result["score_margin"], 0.15)
+        self.assertEqual(roi_result["second_best_candidate"], "cand_b")
+        self.assertIsNotNone(roi_result["second_best_score"])
+
+    def test_stage2b_backward_compat_zone_axis_singular(self):
+        """zone_axis (singular) produces same result as zone_axes with one entry."""
+        from fourdstem_pipeline.indexing import _parse_zone_axes
+
+        axes_from_singular = _parse_zone_axes({"zone_axis": [1, 2, 3]})
+        self.assertEqual(axes_from_singular, [[1.0, 2.0, 3.0]])
+
+        axes_from_plural = _parse_zone_axes({"zone_axes": [[1, 2, 3]]})
+        self.assertEqual(axes_from_plural, [[1.0, 2.0, 3.0]])
+
+        axes_from_default = _parse_zone_axes({})
+        self.assertEqual(axes_from_default, [[0.0, 0.0, 1.0]])
+
+        # zone_axes takes precedence when both are present
+        axes_both = _parse_zone_axes({"zone_axis": [0, 0, 1], "zone_axes": [[1, 1, 1], [1, 1, 0]]})
+        self.assertEqual(axes_both, [[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]])
 
     # ------------------------------------------------------------------
     # Stage 2A correctness: coordinate mapping
@@ -1284,6 +1496,164 @@ class WorkflowTests(unittest.TestCase):
         txt_path.write_text("garbage content\nno coordinates here\n", encoding="utf-8")
         result = _parse_beam_center_txt(txt_path)
         self.assertIsNone(result)
+
+    # ------------------------------------------------------------------
+    # Stage 2A correctness: Bragg peak QC metrics
+    # ------------------------------------------------------------------
+
+    def test_bragg_qc_metrics_empty_vmap(self):
+        """Zero-peak vmap returns all-zero fractions."""
+        from fourdstem_pipeline.roi_bragg import _compute_bragg_qc_metrics
+
+        vmap = np.zeros((64, 64), dtype=np.float32)
+        result = _compute_bragg_qc_metrics(
+            vmap, beam_center_yx=(32.0, 32.0), sig_shape=(64, 64),
+        )
+        self.assertEqual(result["peak_pixel_count"], 0)
+        self.assertEqual(result["total_peak_votes"], 0)
+        self.assertEqual(result["mean_peak_intensity"], 0.0)
+        self.assertIsNone(result["radial_distances"])
+        self.assertIsNone(result["radial_distance_mean"])
+        self.assertIsNone(result["radial_distance_std"])
+        self.assertEqual(result["forbidden_center_zone_fraction"], 0.0)
+        self.assertEqual(result["edge_peak_fraction"], 0.0)
+        self.assertEqual(result["duplicate_peak_fraction"], 0.0)
+        self.assertIsNone(result["beam_center_error_estimate"])
+
+    def test_bragg_qc_metrics_known_peaks(self):
+        """Synthetic vmap with peaks at known positions computes correct metrics."""
+        from fourdstem_pipeline.roi_bragg import _compute_bragg_qc_metrics
+
+        vmap = np.zeros((64, 64), dtype=np.float32)
+        # Place peaks at known positions
+        vmap[32, 40] = 5.0   # radius = 8 from center (32,32)
+        vmap[32, 24] = 3.0   # radius = 8 from center
+        vmap[40, 32] = 2.0   # radius = 8 from center
+        vmap[24, 32] = 1.0   # radius = 8 from center
+        # Edge peak
+        vmap[1, 32] = 1.0    # near top edge
+        # Center zone peak
+        vmap[32, 33] = 1.0   # radius = 1 from center
+
+        result = _compute_bragg_qc_metrics(
+            vmap, beam_center_yx=(32.0, 32.0), sig_shape=(64, 64),
+            center_zone_radius=5.0, edge_boundary=10, min_peak_spacing=4.0,
+        )
+        self.assertEqual(result["peak_pixel_count"], 6)
+        self.assertEqual(result["total_peak_votes"], 13)
+        self.assertAlmostEqual(result["mean_peak_intensity"], 13 / 6, places=1)
+        self.assertIsNotNone(result["radial_distances"])
+        self.assertEqual(len(result["radial_distances"]), 6)
+        # Centre zone: only the peak at (32,33) with radius 1 is within 5 px
+        self.assertAlmostEqual(result["forbidden_center_zone_fraction"], 1 / 6, places=3)
+        # Edge: peak at (1, 32) is within 10 px of top edge
+        self.assertAlmostEqual(result["edge_peak_fraction"], 1 / 6, places=3)
+        # No duplicates (all peaks are > 4 px apart)
+        self.assertEqual(result["duplicate_peak_fraction"], 0.0)
+        # Beam center error should be small (symmetric pattern centered on beam)
+        self.assertIsNotNone(result["beam_center_error_estimate"])
+
+    def test_bragg_qc_metrics_duplicate_peaks(self):
+        """Closely-spaced peaks produce high duplicate fraction."""
+        from fourdstem_pipeline.roi_bragg import _compute_bragg_qc_metrics
+
+        vmap = np.zeros((64, 64), dtype=np.float32)
+        # Cluster of peaks within 2 px of each other
+        vmap[32, 32] = 1.0
+        vmap[32, 33] = 1.0  # distance 1 from (32,32)
+        vmap[33, 32] = 1.0  # distance 1 from (32,32)
+        # Isolated peak far away
+        vmap[50, 50] = 1.0
+
+        result = _compute_bragg_qc_metrics(
+            vmap, beam_center_yx=(32.0, 32.0), sig_shape=(64, 64),
+            min_peak_spacing=4.0,
+        )
+        # 3 out of 4 peaks have a neighbor within min_peak_spacing
+        # (32,32), (32,33), (33,32) all have close neighbors; (50,50) is isolated
+        self.assertEqual(result["peak_pixel_count"], 4)
+        self.assertGreater(result["duplicate_peak_fraction"], 0.5)
+
+    def test_bragg_qc_metrics_no_beam_center(self):
+        """Metrics gracefully handle missing beam center."""
+        from fourdstem_pipeline.roi_bragg import _compute_bragg_qc_metrics
+
+        vmap = np.zeros((64, 64), dtype=np.float32)
+        vmap[32, 40] = 1.0
+        result = _compute_bragg_qc_metrics(
+            vmap, beam_center_yx=None, sig_shape=(64, 64),
+        )
+        self.assertIsNone(result["radial_distances"])
+        self.assertIsNone(result["radial_distance_mean"])
+        self.assertIsNone(result["beam_center_error_estimate"])
+        self.assertEqual(result["forbidden_center_zone_fraction"], 0.0)
+        # Edge and duplicate should still work without beam center
+        self.assertIsNotNone(result["edge_peak_fraction"])
+        self.assertIsNotNone(result["duplicate_peak_fraction"])
+
+    def test_bragg_peaks_parquet_empty(self):
+        """Empty Bragg detection produces null parquet path."""
+        from unittest.mock import MagicMock
+        from fourdstem_pipeline.roi_bragg import _save_bragg_peaks_table
+
+        bragg = MagicMock()
+        bragg.raw.__getitem__.side_effect = IndexError("no data")
+        path, summary = _save_bragg_peaks_table(
+            bragg, self.output_dir, scan_shape=(4, 4),
+        )
+        self.assertIsNone(path)
+        self.assertEqual(summary["parquet_rows"], 0)
+        self.assertIsNone(summary["peaks_per_pattern_mean"])
+
+    def test_bragg_peaks_parquet_saves_correctly(self):
+        """Parquet output contains expected columns and row count."""
+        from unittest.mock import MagicMock
+        from fourdstem_pipeline.roi_bragg import _save_bragg_peaks_table
+        import pandas as pd
+
+        # Build a minimal mock that mimics py4DSTEM's BVects/PointListArray
+        class MockBVects:
+            def __init__(self, qy_vals, qx_vals, i_vals):
+                self.qy = np.asarray(qy_vals, dtype=np.float64)
+                self.qx = np.asarray(qx_vals, dtype=np.float64)
+                self.I = np.asarray(i_vals, dtype=np.float64)
+                self.data = np.zeros(len(qy_vals), dtype=[
+                    ("qy", np.float64), ("qx", np.float64), ("intensity", np.float64),
+                ])
+                self.data["qy"] = self.qy
+                self.data["qx"] = self.qx
+                self.data["intensity"] = self.I
+
+        class MockRaw:
+            def __getitem__(self, key):
+                rx, ry = key
+                if rx == 0 and ry == 0:
+                    return MockBVects([10.0, 20.0], [30.0, 40.0], [0.8, 0.6])
+                if rx == 1 and ry == 0:
+                    return MockBVects([15.0], [35.0], [0.9])
+                return MockBVects([], [], [])
+
+        bragg = MagicMock()
+        bragg.raw = MockRaw()
+
+        path, summary = _save_bragg_peaks_table(
+            bragg, self.output_dir, scan_shape=(4, 4),
+        )
+        self.assertIsNotNone(path)
+        self.assertTrue(path.exists())
+        self.assertEqual(summary["parquet_rows"], 3)
+
+        df = pd.read_parquet(path)
+        self.assertEqual(len(df), 3)
+        self.assertListEqual(list(df.columns), ["scan_y", "scan_x", "qy", "qx", "intensity", "snr"])
+        # First two peaks at scan position (0,0)
+        self.assertEqual(df.iloc[0]["scan_y"], 0)
+        self.assertEqual(df.iloc[0]["scan_x"], 0)
+        self.assertAlmostEqual(df.iloc[0]["qy"], 10.0)
+        self.assertAlmostEqual(df.iloc[0]["qx"], 30.0)
+        # Third peak at (1,0)
+        self.assertEqual(df.iloc[2]["scan_y"], 0)
+        self.assertEqual(df.iloc[2]["scan_x"], 1)
 
     # ------------------------------------------------------------------
     # Stage 2A correctness: cluster validation
