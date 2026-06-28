@@ -135,7 +135,7 @@ python -m fourdstem_pipeline.cli stage2 --config configs/stage2_roi_bragg.yaml
 | `stage2_qc_summary.json` | QC flags: NO_BRAGG_PEAKS, HIGH_BACKGROUND_ROIS, etc. |
 | `stage2_report.html` | Per-ROI table with [READY]/[REVIEW]/[SKIP] verdicts |
 | `stage2_benchmark.json` | Per-ROI extraction time, Bragg time, data size |
-| `roi_<name>/roi_data.npy` | Extracted 4D sub-cube (float32) |
+| `roi_<name>/roi_data.npy` | Extracted 4D sub-cube (only when `save_roi_data: true`) |
 | `roi_<name>/bragg_vector_map.npy` | Calibrated Bragg peak positions |
 | `roi_<name>/bragg_summary.json` | Full per-ROI metadata |
 | `roi_<name>/mean_dp.png` | Log-scale mean diffraction pattern |
@@ -301,6 +301,7 @@ min_peak_spacing: 4
 subpixel: poly
 max_num_peaks: 70
 cuda: false
+save_roi_data: false          # Set to true to keep roi_data.npy (large; needed for Stage 2B template matching)
 ```
 
 ### Stage 2B (`configs/stage2_indexing.yaml`)
@@ -362,7 +363,7 @@ outputs/<run>/
 │   ├── stage2_benchmark.json
 │   ├── provenance.json
 │   └── roi_<name>/
-│       ├── roi_data.npy             # 4D sub-cube
+│       ├── roi_data.npy             # 4D sub-cube (only when save_roi_data: true)
 │       ├── bragg_peaks.parquet      # Tabular Bragg peaks (scan_y/x, qy/x, intensity, snr)
 │       ├── bragg_vector_map.npy     # Bragg peak vote histogram
 │       ├── bragg_summary.json       # Full per-ROI metadata (incl. Bragg QC)

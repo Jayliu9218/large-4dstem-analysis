@@ -687,6 +687,7 @@ def run_roi_bragg_for_rois(
     beam_center_yx: tuple[float, float] | None = None,
     labels: np.ndarray | None = None,
     sample_mask: np.ndarray | None = None,
+    save_roi_data: bool = False,
 ) -> list[ROIBraggResult]:
     """Run py4DSTEM Bragg-disk detection on a set of ROIs.
 
@@ -851,6 +852,7 @@ def run_roi_bragg_for_rois(
                 py4dstem_version=py4dstem_version,
                 scan_shape=scan_shape_tuple,
                 data_path_str=str(data_path),
+                save_roi_data=save_roi_data,
             )
             results.append(result)
             log.info(
@@ -897,6 +899,7 @@ def _process_one_roi(
     py4dstem_version: str,
     scan_shape: tuple[int, int],
     data_path_str: str,
+    save_roi_data: bool = False,
 ) -> ROIBraggResult:
     """Extract and process a single ROI sub-cube.
 
@@ -1019,9 +1022,11 @@ def _process_one_roi(
         r_bin=r_bin,
     )
 
-    # --- Save raw ROI data --------------------------------------------------
-    roi_data_path = roi_dir / "roi_data.npy"
-    np.save(roi_data_path, roi_data)
+    # --- Save raw ROI data (optional — large; off by default) ----------------
+    roi_data_path: Path | None = None
+    if save_roi_data:
+        roi_data_path = roi_dir / "roi_data.npy"
+        np.save(roi_data_path, roi_data)
 
     # --- Visualise mean diffraction pattern ----------------------------------
     try:

@@ -182,6 +182,7 @@ def run_stage2(config: str | Path | dict[str, Any]) -> Stage2Result:
         beam_center_yx=beam_center_yx,
         labels=labels,
         sample_mask=sample_mask,
+        save_roi_data=bool(cfg.get("save_roi_data", False)),
     )
 
     # --- Collect provenance -------------------------------------------------

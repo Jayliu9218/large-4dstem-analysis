@@ -46,3 +46,9 @@ min_peak_spacing: 4
 subpixel: poly
 max_num_peaks: 70
 cuda: false
+
+# Save the extracted 4D sub-cube (roi_data.npy) for each ROI.
+# This file can be large (10s–100s of MB per ROI); set to true only
+# if you need the raw data for external tools or Stage 2B template
+# matching.  Stage 2B can still run mock scoring without it.
+save_roi_data: false
