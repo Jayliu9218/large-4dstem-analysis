@@ -18,6 +18,6 @@ dependencies:
   - pip:
       - hyperspy>=2
       - pyxem>=0.20
-      - py4DSTEM>=0.14
+      - git+https://github.com/py4dstem/py4DSTEM.git@dev
       - dask[array]>=2024.1
       - zarr>=2

@@ -133,7 +133,7 @@ Consumes a Stage-1 output directory, loads the validated `Stage1Manifest`,
 extracts per-ROI sub-cubes, runs py4DSTEM `find_Bragg_disks()` on each, and
 produces a `stage2_summary.json` + `stage2_qc_summary.json`.
 
-Requires `py4DSTEM>=0.14`.
+Requires py4DSTEM (dev branch).
 
 Returns exit code 0 if all ROIs succeed, 1 if any fail.
 
@@ -385,8 +385,8 @@ other diagnostics and the report are still produced.
 
 ```bash
 pip install -e ".[diffraction]"
-# or
-pip install py4DSTEM>=0.14
+# or directly from the dev branch:
+pip install git+https://github.com/py4dstem/py4DSTEM.git@dev
 ```
 
 ### Stage 2A: "Cannot determine data file path"

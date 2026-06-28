@@ -27,7 +27,7 @@ large-data = [
     "zarr>=2",
 ]
 diffraction = [
-    "py4DSTEM>=0.14",
+    "py4DSTEM @ git+https://github.com/py4dstem/py4DSTEM.git@dev",
 ]
 test = [
     "pytest>=8",
