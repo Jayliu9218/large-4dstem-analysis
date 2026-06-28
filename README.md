@@ -9,41 +9,39 @@ Single non-visual workflow for large 4D-STEM data, focused on:
 - ROI Bragg-disk detection via py4DSTEM (Stage 2A)
 - Sample mask generation for vacuum exclusion
 
-The codebase is intentionally small: one package, three CLI entry points, YAML
-configs, and focused tests. Outputs are NumPy arrays, JSON metadata, and PNG
-previews — no Jupyter notebooks required.
+The codebase is intentionally small: one package, one CLI module with three
+subcommands, YAML configs, and focused tests. Outputs are NumPy arrays, JSON
+metadata, and PNG previews — no Jupyter notebooks required.
 
 ---
 
 ## Installation
 
+### Quick: conda / mamba (recommended)
+
 ```bash
-# Clone and install in editable mode with test dependencies
-git clone <repo-url> && cd large-4dstem-analysis
-pip install -e ".[test]"
+# Create and activate the environment
+conda env create -f environment.yml
+conda activate large-4dstem
 
-# For real MIB/HDF5 data, also install the large-data stack
-pip install -e ".[large-data]"
-
-# For Stage 2A ROI Bragg detection
-pip install -e ".[diffraction]"
-
-# Or install everything at once
+# Install this package in editable mode
 pip install -e ".[test,large-data,diffraction]"
 ```
 
-> **Windows note**: If `python` doesn't work in bash, use the full path to your
-> Miniconda Python (e.g. `C:/ProgramData/miniconda3/python.exe`). The Windows
-> Store Python stub at `%LOCALAPPDATA%/Microsoft/WindowsApps/python.exe` does
-> not work in non-interactive shells.
-
-After installation, three commands become available:
+### Manual: pip only
 
 ```bash
-fourdstem-run       --config configs/your_config.yaml    # Stage 1 screening
-fourdstem-dry-run   --config configs/your_config.yaml    # Validate without loading data
-fourdstem-stage2    --config configs/stage2_roi_bragg.yaml  # Stage 2A Bragg detection
+pip install -e ".[test,large-data,diffraction]"
 ```
+
+### Verify
+
+```bash
+python -m fourdstem_pipeline.cli dry_run --config configs/default_workflow.yaml
+```
+
+All commands use the `python -m fourdstem_pipeline.cli <subcommand>` form so
+they work regardless of whether the pip-installed scripts are on PATH.
 
 ---
 
@@ -51,12 +49,12 @@ fourdstem-stage2    --config configs/stage2_roi_bragg.yaml  # Stage 2A Bragg det
 
 ```bash
 # 1. Validate your config — no data loaded, ~1 second
-fourdstem-dry-run --config configs/default_workflow.yaml
+python -m fourdstem_pipeline.cli dry_run --config configs/default_workflow.yaml
 
 # 2. Run Stage 1 on the synthetic demo dataset
-fourdstem-run --config configs/default_workflow.yaml
+python -m fourdstem_pipeline.cli run --config configs/default_workflow.yaml
 
-# 3. Run tests to verify everything works
+# 3. Run the test suite
 python -m pytest tests/ -v
 ```
 
@@ -67,26 +65,32 @@ Point `data.path` at a real `.mib`, `.npy`, or `.npz` file when ready.
 
 ```bash
 # Step 0: Dry-run to check config and estimate memory
-fourdstem-dry-run --config configs/0617_4d_workflow.yaml
+python -m fourdstem_pipeline.cli dry_run --config configs/0617_4d_workflow.yaml
 
 # Step 1: Stage 1 screening
-fourdstem-run --config configs/0617_4d_workflow.yaml
+python -m fourdstem_pipeline.cli run --config configs/0617_4d_workflow.yaml
 
 # Step 2: Inspect the HTML report to pick ROIs
 #   → outputs/<run>/report.html
 
 # Step 3: Run Stage 2A Bragg detection on those ROIs
-fourdstem-stage2 --config configs/stage2_roi_bragg.yaml
+python -m fourdstem_pipeline.cli stage2 --config configs/stage2_roi_bragg.yaml
 ```
 
 ---
 
 ## CLI Reference
 
-### `fourdstem-run` — Stage 1 screening
+All commands use the form `python -m fourdstem_pipeline.cli <subcommand>`.
+If you have the pip scripts directory on PATH you can also use the shorter
+`fourdstem-run`, `fourdstem-dry-run`, `fourdstem-stage2` forms directly.
+
+### `run` — Stage 1 screening
 
 ```
-fourdstem-run --config configs/default_workflow.yaml [--log-level DEBUG|INFO|WARNING|ERROR]
+python -m fourdstem_pipeline.cli run \
+    --config configs/default_workflow.yaml \
+    [--log-level DEBUG|INFO|WARNING|ERROR]
 ```
 
 Loads a 4D-STEM dataset, preprocesses, computes virtual images
@@ -95,10 +99,12 @@ orientation preview, sample mask, QC checks, and writes a Markdown+HTML report.
 
 Returns exit code 0 on success, 1 if any stage errors.
 
-### `fourdstem-dry-run` — pre-flight validation
+### `dry_run` — pre-flight validation
 
 ```
-fourdstem-dry-run --config configs/default_workflow.yaml [--json]
+python -m fourdstem_pipeline.cli dry_run \
+    --config configs/default_workflow.yaml \
+    [--json]
 ```
 
 Without loading the full dataset, validates:
@@ -115,17 +121,19 @@ Use `--json` to also print a machine-readable summary to stdout. A
 
 Returns exit code 0 on OK/OK_WITH_WARNINGS, 1 on FAIL.
 
-### `fourdstem-stage2` — Stage 2A ROI Bragg detection
+### `stage2` — Stage 2A ROI Bragg detection
 
 ```
-fourdstem-stage2 --config configs/stage2_roi_bragg.yaml [--log-level DEBUG|INFO|WARNING|ERROR]
+python -m fourdstem_pipeline.cli stage2 \
+    --config configs/stage2_roi_bragg.yaml \
+    [--log-level DEBUG|INFO|WARNING|ERROR]
 ```
 
 Consumes a Stage-1 output directory, loads the validated `Stage1Manifest`,
 extracts per-ROI sub-cubes, runs py4DSTEM `find_Bragg_disks()` on each, and
 produces a `stage2_summary.json` + `stage2_qc_summary.json`.
 
-Requires `py4DSTEM>=0.14` (`pip install -e ".[diffraction]"`).
+Requires `py4DSTEM>=0.14`.
 
 Returns exit code 0 if all ROIs succeed, 1 if any fail.
 
@@ -313,21 +321,36 @@ convention. When configuring `orientation.roi` or `roi_bragg.roi`, ensure
 
 ## Troubleshooting
 
-### "python not found" or empty output in bash (Windows)
+### Python not found or empty output (Windows)
 
-`which python` may point to the Windows Store stub at
-`%LOCALAPPDATA%/Microsoft/WindowsApps/python.exe`, which does not work in
-non-interactive shells. Use your Miniconda Python explicitly:
+The Windows Store Python stub at
+`%LOCALAPPDATA%/Microsoft/WindowsApps/python.exe` does not work in
+non-interactive shells. Use Miniconda Python instead:
 
-```bash
-C:/ProgramData/miniconda3/python.exe -m pytest tests/ -v
-C:/ProgramData/miniconda3/python.exe -m fourdstem_pipeline.cli run --config ...
+```powershell
+# In PowerShell
+C:/ProgramData/miniconda3/python.exe -m fourdstem_pipeline.cli dry_run --config configs/default_workflow.yaml
 ```
 
-Or set up an alias in `~/.bashrc`:
-```bash
-alias python='C:/ProgramData/miniconda3/python.exe'
+Or activate the conda environment first:
+
+```powershell
+conda activate large-4dstem
+python -m fourdstem_pipeline.cli dry_run --config configs/default_workflow.yaml
 ```
+
+### CLI commands not found
+
+If you see `command not found` for `fourdstem-run` etc., pip installed the
+scripts to a directory that isn't on your PATH. Use the module form instead:
+
+```bash
+python -m fourdstem_pipeline.cli run --config configs/default_workflow.yaml
+python -m fourdstem_pipeline.cli dry_run --config configs/default_workflow.yaml
+python -m fourdstem_pipeline.cli stage2 --config configs/stage2_roi_bragg.yaml
+```
+
+These work identically and don't require PATH configuration.
 
 ### Orientation ROI with zero area
 
@@ -358,13 +381,13 @@ When orientation is skipped, orientation-dependent diagnostics (reliability
 maps, ROI candidates based on orientation scores) are not generated, but all
 other diagnostics and the report are still produced.
 
-### Stage 2A: "py4DSTEM not installed"
+### Stage 2A: py4DSTEM not installed
 
 ```bash
 pip install -e ".[diffraction]"
+# or
+pip install py4DSTEM>=0.14
 ```
-
-Or directly: `pip install py4DSTEM>=0.14`
 
 ### Stage 2A: "Cannot determine data file path"
 
@@ -375,15 +398,13 @@ The Stage 2 config needs to find the original MIB file. Either:
 ### Binning truncation
 
 When `q_bin` or `r_bin` doesn't evenly divide the detector or navigation
-dimensions, the edge pixels are silently truncated. The pipeline now logs
-warnings when this happens. To avoid data loss, choose bin factors that
-divide your dimensions evenly.
+dimensions, edge pixels are truncated. The pipeline logs warnings when this
+happens. Choose bin factors that divide your dimensions evenly.
 
-### Emoji display (mojibake) in generated reports
+### Emoji display (mojibake) in reports
 
-The pipeline avoids Unicode emoji in generated Markdown and HTML. QC status is
-rendered as ASCII labels (`[PASS]`, `[WARN]`, `[FAIL]`, `[N/A]`) for maximum
-compatibility across platforms, terminals, and text editors.
+QC status is rendered as ASCII labels (`[PASS]`, `[WARN]`, `[FAIL]`, `[N/A]`)
+for maximum compatibility across platforms, terminals, and text editors.
 
 ---
 
@@ -399,50 +420,50 @@ through HyperSpy/RosettaSciIO, and `backend: hyperspy_pyxem` asks the loader to
 register pyxem diffraction semantics when pyxem is available while keeping the
 block-wise fallback path intact.
 
-```bash
-pip install -e ".[large-data]"
-```
-
-`load_dataset()` will then try HyperSpy lazy loading first for `.mib` files.
+`load_dataset()` will try HyperSpy lazy loading first for `.mib` files.
 Use `preprocess.q_crop`, `preprocess.q_bin`, and `preprocess.r_bin` to reduce
 large data before phase screening.
 
-For the current `data/0617-4d` folder, start with:
+For the `data/0617-4d` folder, start with:
 
 ```bash
-fourdstem-run --config configs/0617_4d_workflow.yaml
+python -m fourdstem_pipeline.cli run --config configs/0617_4d_workflow.yaml
 ```
 
-That preset chooses one 512×512 MIB scan from the directory, crops the central
-diffraction region, bins diffraction 2×, and bins scan navigation 4× for a
-128×128 first-pass screening workflow.
+That preset chooses one 512×512 MIB scan, crops the central diffraction region,
+bins diffraction 2×, and bins scan navigation 4× for a 128×128 screening run.
 
 ---
 
 ## Development
 
+### Setup
+
 ```bash
-# Install with all optional dependencies
+conda env create -f environment.yml
+conda activate large-4dstem
 pip install -e ".[test,large-data,diffraction]"
+```
 
-# Run tests
+### Run tests
+
+```bash
 python -m pytest tests/ -v
+```
 
-# Run with debug logging
-fourdstem-run --config configs/default_workflow.yaml --log-level DEBUG
+### Run with debug logging
+
+```bash
+python -m fourdstem_pipeline.cli run --config configs/default_workflow.yaml --log-level DEBUG
 ```
 
 ### Running without pip install
 
-If you prefer not to install the package, use the script entry point:
-
 ```bash
+# Use the script entry point
 python scripts/run_workflow.py --config configs/default_workflow.yaml
-```
 
-Or run the CLI module directly:
-
-```bash
+# Or the CLI module directly
 python -m fourdstem_pipeline.cli run --config configs/default_workflow.yaml
 ```
 
@@ -450,7 +471,7 @@ python -m fourdstem_pipeline.cli run --config configs/default_workflow.yaml
 
 ```
 src/fourdstem_pipeline/
-├── cli.py              # CLI entry points (fourdstem-run, -dry-run, -stage2)
+├── cli.py              # CLI entry points (run, dry_run, stage2 subcommands)
 ├── workflow.py         # Stage 1 orchestration
 ├── stage2.py           # Stage 2A orchestration
 ├── roi_bragg.py        # py4DSTEM Bragg disk detection per ROI
