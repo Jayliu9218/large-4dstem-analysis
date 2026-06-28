@@ -20,30 +20,43 @@ output_dir: null
 # indexing aid. Set it explicitly once detector calibration is known.
 template_generation:
   max_index: 4
-  # Single zone axis (backward compat). Equivalent to zone_axes: [[0,0,1]].
-  zone_axis: [0, 0, 1]
-  # Multi-zone-axis mode — uncomment to enable; overrides zone_axis above.
-  # Templates are generated for each direction and concatenated; the matcher
-  # reports the best (candidate, zone_axis, in-plane angle) triplet plus a
-  # score margin against the runner-up.
-  # zone_axes:
-  #   - [0, 0, 1]
-  #   - [1, 0, 0]
-  #   - [1, 1, 0]
-  #   - [1, 1, 1]
-  #   - [1, 1, 2]
+  # Multi-zone-axis mode — templates generated for each direction and
+  # concatenated; the matcher reports the best (candidate, zone_axis,
+  # in-plane angle) triplet plus a score margin against the runner-up.
+  zone_axes:
+    - [0, 0, 1]
+    - [1, 0, 0]
+    - [1, 1, 0]
+    - [1, 1, 1]
+    - [1, 1, 2]
   orientation_step_deg: 5
   orientations_deg: null
   peak_sigma_px: 5.0
-  reciprocal_pixels_per_inv_angstrom: null
+  # Physical reciprocal calibration from camera length and convergence angle.
+  # Assumes 200 kV (lambda = 0.02508 A), L = 91 mm, L*lambda = 2.282 mm*A,
+  # detector pixel size ~6.5 um (DE-16 / direct-electron detector).
+  # Formula: px/A = L*lambda / (2*pi * pixel_size_mm)
+  #         = 2.282 / (2*pi * 0.0065) ~ 55.9
+  # Set to null for legacy auto_fit_to_detector behaviour.
+  reciprocal_pixels_per_inv_angstrom: 55.9
   intensity_power: 2.0
 
 # Candidate CIFs. CIFs with lattice parameters generate analytic kinematic
 # templates; reference_peaks is retained only for mocked contract tests.
+#
+# space_group (optional): Override the CIF's declared space group for
+# systematic-extinction filtering.  The current Ti CIFs use P1 (space
+# group 1) for convenience, which omits all extinction rules.  Setting
+# the true space group removes kinematically forbidden reflections:
+#   Ti-hcp → P6_3/mmc (194): 00l with l odd removed
+#   Ti-bcc → Im-3m (229):   h+k+l odd removed
+# Unrecognised space groups produce an info log and retain all reflections.
 candidate_cifs:
   - name: Ti_hcp
     phase: Ti-hcp
     path: data/0617-4d/Ti-hcp.cif
+    space_group: 194
   - name: Ti_bcc
     phase: Ti-bcc
     path: data/0617-4d/Ti-bcc.cif
+    space_group: 229

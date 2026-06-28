@@ -28,7 +28,7 @@ assignment.  Three-stage design with validated data contracts between stages.
 |-------|--------|--------|
 | 1 | Fingerprint classes | 4 clusters on 256×256 nav (`r_bin=2`) |
 | 2A | Bragg detection | 6,750 peaks in `cluster0_core_01`, QC PASS |
-| 2B | Template matching | Ti-hcp / Ti-bcc candidates, scores 0.40–0.50 (medium) |
+| 2B | Template matching | Ti-hcp / Ti-bcc candidates, scores −0.03 to −0.07 (low), phase confidence: low |
 
 ---
 
@@ -459,22 +459,39 @@ Config:   0617_4d_stage1_enhanced.yaml (r_bin=2, q_crop=[16,240,16,240], q_bin=2
 | | | |
 | **2B** | Candidates | Ti-bcc (cubic, a=3.25 Å), Ti-hcp (hex, a=4.57 Å, c=2.83 Å) |
 | **2B** | Templates | 144 (72 per candidate, 5° step, [0,0,1] zone axis) |
-| **2B** | Match scores | 0.40–0.50 (medium) |
-| **2B** | Phase confidence | low (single zone axis; enable `zone_axes` for discriminative margins) |
-| **2B** | Auto-scale | ~57 px/Å (auto-fit to detector radius) |
+| **2B** | Match scores | −0.069 to −0.028 (low; *negative* — templates anti-correlated with data) |
+| **2B** | Score margins | 0.0004–0.007 (below random-noise floor of ~0.008 for 5 ROIs) |
+| **2B** | Phase confidence | low for all 11 ROIs (single zone axis, `save_roi_data: false`) |
+| **2B** | Phase distribution | 10/11 Ti-hcp, 1/11 Ti-bcc (not crystallographic proof; see caveats below) |
+| **2B** | Auto-scale | ~55–58 px/Å (auto-fit to detector radius; **no camera-length calibration**) |
 | **2B** | Elapsed | ~8 s |
+
+> **⚠️ Caveat:** These results are from `save_roi_data: false` (bragg-vector-map
+> fallback) with a single [001] zone axis and auto-fit reciprocal scale. Under
+> these conditions template matching produces **negative normalized correlations**
+> — the templates anti-correlate with the Bragg vector map because the map is
+> dominated by the central-beam falloff. Score margins between Ti-hcp and Ti-bcc
+> are smaller than the expected random-noise floor (σ ≈ 0.008), making the two
+> phases statistically indistinguishable. **Treat the phase map as a candidate
+> distribution for method development, not as crystallographic evidence.**
 
 ### Template matching notes
 
 `peak_sigma_px` controls Gaussian spot width — tune to match your convergence
 angle (3–6 px for typical CBED). With the default of 5.0 px and the
-bragg-vector-map fallback (`save_roi_data: false`), scores are 0.40–0.50
-(medium quality). For higher-quality matching:
+bragg-vector-map fallback (`save_roi_data: false`), template correlations are
+negative and non-discriminative (scores −0.07 to −0.03, margins < 0.008). For
+physically meaningful matching:
 
-1. Set `save_roi_data: true` in Stage 2A config for full mean-DP correlation.
-2. Enable multi-zone-axis mode (`zone_axes`) in Stage 2B config for
+1. **Set `save_roi_data: true`** in Stage 2A config for full mean-DP correlation.
+   This is the single most impactful change — matching against the actual mean
+   diffraction pattern instead of the Bragg vector map yields physically
+   meaningful (positive) correlation scores.
+2. **Set `reciprocal_pixels_per_inv_angstrom`** if camera length is calibrated
+   (e.g. CL91mm at this convergence angle). Without it, templates are
+   auto-scaled to the detector radius and ring positions have no physical basis.
+3. Enable multi-zone-axis mode (`zone_axes`) in Stage 2B config for
    discriminative score margins between competing phases.
-3. Set `reciprocal_pixels_per_inv_angstrom` if camera length is calibrated.
 
 ---
 

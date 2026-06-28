@@ -183,6 +183,7 @@ def run_stage2(config: str | Path | dict[str, Any]) -> Stage2Result:
         labels=labels,
         sample_mask=sample_mask,
         save_roi_data=bool(cfg.get("save_roi_data", False)),
+        central_exclusion_radius=float(cfg.get("central_exclusion_radius", 0.0)),
     )
 
     # --- Collect provenance -------------------------------------------------

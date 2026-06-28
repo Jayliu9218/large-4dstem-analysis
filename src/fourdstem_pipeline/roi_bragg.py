@@ -688,6 +688,7 @@ def run_roi_bragg_for_rois(
     labels: np.ndarray | None = None,
     sample_mask: np.ndarray | None = None,
     save_roi_data: bool = False,
+    central_exclusion_radius: float = 0.0,
 ) -> list[ROIBraggResult]:
     """Run py4DSTEM Bragg-disk detection on a set of ROIs.
 
@@ -853,6 +854,7 @@ def run_roi_bragg_for_rois(
                 scan_shape=scan_shape_tuple,
                 data_path_str=str(data_path),
                 save_roi_data=save_roi_data,
+                central_exclusion_radius=central_exclusion_radius,
             )
             results.append(result)
             log.info(
@@ -900,6 +902,7 @@ def _process_one_roi(
     scan_shape: tuple[int, int],
     data_path_str: str,
     save_roi_data: bool = False,
+    central_exclusion_radius: float = 0.0,
 ) -> ROIBraggResult:
     """Extract and process a single ROI sub-cube.
 
@@ -1068,6 +1071,24 @@ def _process_one_roi(
     # --- Save Bragg vector map ----------------------------------------------
     histogram = bragg.histogram(mode="cal")
     vmap = np.asarray(histogram.data, dtype=np.float32)
+
+    # --- Central exclusion: zero pixels within radius of beam centre --------
+    central_exclusion_applied: bool = False
+    if central_exclusion_radius > 0 and beam_center_yx is not None:
+        bc_y_binned = float(beam_center_yx[0]) / float(bin_q)
+        bc_x_binned = float(beam_center_yx[1]) / float(bin_q)
+        yy, xx = np.indices(vmap.shape, dtype=np.float64)
+        rr = np.sqrt((yy - bc_y_binned) ** 2 + (xx - bc_x_binned) ** 2)
+        central_mask = rr < float(central_exclusion_radius)
+        n_excluded = int(np.sum(central_mask & (vmap > 0)))
+        vmap[central_mask] = 0.0
+        central_exclusion_applied = True
+        log.info(
+            "ROI '%s': central exclusion radius=%.1f px → %d peak(s) removed (%d remaining).",
+            name, central_exclusion_radius, n_excluded,
+            int(np.count_nonzero(vmap)),
+        )
+
     bragg_vector_map_path = roi_dir / "bragg_vector_map.npy"
     np.save(bragg_vector_map_path, vmap)
     n_peaks = int(np.count_nonzero(vmap))
@@ -1086,6 +1107,8 @@ def _process_one_roi(
         min_peak_spacing=float(bragg_kwargs.get("minPeakSpacing", 4)),
         edge_boundary=int(bragg_kwargs.get("edgeBoundary", 10)),
     )
+    bragg_qc["central_exclusion_radius"] = float(central_exclusion_radius)
+    bragg_qc["central_exclusion_applied"] = central_exclusion_applied
 
     # --- Per-pattern peak counts (from parquet summary) ----------------------
     bragg_qc["peaks_per_pattern_mean"] = parquet_summary.get("peaks_per_pattern_mean")

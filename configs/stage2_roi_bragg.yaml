@@ -41,14 +41,25 @@ scan_shape: null
 corr_power: 1.0
 sigma_cc: 1
 edge_boundary: 10
-min_relative_intensity: 0.05
+# Minimum relative intensity for Bragg disk detection.  0.05 is py4DSTEM's
+# default but often admits central-beam tails and background fluctuations.
+# 0.10–0.15 is more selective for genuine diffraction disks.
+min_relative_intensity: 0.10
 min_peak_spacing: 4
 subpixel: poly
 max_num_peaks: 70
 cuda: false
 
+# Central exclusion radius in binned detector pixels (after bin_q).
+# Pixels within this distance of the beam centre are zeroed in the Bragg
+# vector map.  Use to suppress central-beam / bright-field-tail detections
+# that are not real Bragg disks.  At bin_q=2 and 256×256 detector, the
+# binned shape is 128×128; a radius of 30 px excludes ~5.5% of the
+# detector area around the beam centre.  Set to 0 to disable.
+central_exclusion_radius: 30
+
 # Save the extracted 4D sub-cube (roi_data.npy) for each ROI.
 # This file can be large (10s–100s of MB per ROI); set to true only
 # if you need the raw data for external tools or Stage 2B template
 # matching.  Stage 2B can still run mock scoring without it.
-save_roi_data: false
+save_roi_data: true

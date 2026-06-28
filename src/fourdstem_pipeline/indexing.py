@@ -39,6 +39,7 @@ class IndexingCandidate:
     template_metadata_path: Path | None = None
     template_count: int = 0
     scoring_mode: str = "not_scored"
+    space_group: int | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,7 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
                 "template_stack_path": str(c.template_stack_path) if c.template_stack_path else None,
                 "template_metadata_path": str(c.template_metadata_path) if c.template_metadata_path else None,
                 "scoring_mode": _candidate_scoring_mode(c),
+                "space_group": c.space_group,
             }
             for c in candidates
         ],
@@ -172,6 +174,9 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
     }
     if not any_template:
         summary["notes"].append("No analytic templates were generated; mock scoring may appear only for test fixtures.")
+
+    # --- Score-sign QC check --------------------------------------------------
+    _check_score_signs(roi_results, summary)
 
     summary_path = output_dir / "stage2_indexing_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
@@ -378,6 +383,11 @@ def _load_candidates(items: list[dict[str, Any]] | None, base_dir: Path) -> list
             raise ValueError("Each candidate_cifs entry must contain 'path'.")
         path = _resolve_path(raw_path, base_dir)
         cell = _parse_cif_cell(path)
+        # Space group override: config value takes precedence over CIF content.
+        # Use to apply correct extinction rules when CIF uses P1 for convenience.
+        space_group = item.get("space_group")
+        if space_group is not None:
+            space_group = int(space_group)
         candidates.append(
             IndexingCandidate(
                 name=str(item.get("name") or path.stem or f"candidate_{i:03d}"),
@@ -386,6 +396,7 @@ def _load_candidates(items: list[dict[str, Any]] | None, base_dir: Path) -> list
                 reference_peaks=tuple(item.get("reference_peaks") or ()),
                 sha256=_sha256_file(path),
                 cell=cell,
+                space_group=space_group,
             )
         )
     return candidates
@@ -427,6 +438,7 @@ def _generate_candidate_templates(
                     peak_sigma_px=float(template_cfg["peak_sigma_px"]),
                     reciprocal_pixels_per_inv_angstrom=template_cfg["reciprocal_pixels_per_inv_angstrom"],
                     intensity_power=float(template_cfg["intensity_power"]),
+                    space_group=candidate.space_group,
                 )
                 all_stacks.append(stack)
                 all_orientations.extend(meta["orientations_deg"])
@@ -478,6 +490,7 @@ def _generate_candidate_templates(
                 template_metadata_path=metadata_path,
                 template_count=int(combined_stack.shape[0]),
                 scoring_mode="template_match",
+                space_group=candidate.space_group,
             )
         )
     return result
@@ -886,6 +899,82 @@ def _extract_cif_number(text: str, token: str) -> float | None:
     return None
 
 
+def _apply_extinctions(
+    hkls: np.ndarray,
+    space_group: int | None,
+) -> np.ndarray:
+    """Filter *hkls* to remove systematically absent reflections.
+
+    When a CIF uses P1 (space group 1) for convenience but the real
+    structure has higher symmetry, the user can supply the true space
+    group number in the config.  This function removes kinematically
+    forbidden reflections that would add phantom spots to the templates.
+
+    Parameters
+    ----------
+    hkls:
+        (N, 3) int array of Miller indices.
+    space_group:
+        International Tables space group number, or *None* (P1 — no
+        filtering).
+
+    Returns
+    -------
+    Boolean mask ``(N,)`` where ``True`` = reflection is **allowed**.
+    """
+    if space_group is None or space_group == 1:
+        return np.ones(len(hkls), dtype=bool)
+
+    h = hkls[:, 0].astype(np.int64)
+    k = hkls[:, 1].astype(np.int64)
+    l = hkls[:, 2].astype(np.int64)
+
+    # Start with all allowed, then knock out forbidden families.
+    allowed = np.ones(len(hkls), dtype=bool)
+
+    if space_group == 194:   # P6_3/mmc — α-Ti (hcp)
+        # 6_3 screw along c: 00l with l odd → absent
+        axial = (h == 0) & (k == 0)
+        allowed[axial & (l % 2 != 0)] = False
+
+    elif space_group == 229:  # Im-3m — β-Ti (bcc)
+        # Body centering: h + k + l odd → absent
+        allowed[(h + k + l) % 2 != 0] = False
+
+    elif space_group == 225:  # Fm-3m — FCC
+        # All-face centering: h,k,l must be all even or all odd
+        parity_sum = (h % 2) + (k % 2) + (l % 2)
+        allowed[(parity_sum != 0) & (parity_sum != 3)] = False
+
+    elif space_group == 227:  # Fd-3m — diamond
+        # h,k,l all even AND h+k+l = 4n, OR h,k,l all odd
+        # (simplified: remove the most prominent forbidden families)
+        all_even = (h % 2 == 0) & (k % 2 == 0) & (l % 2 == 0)
+        all_odd  = (h % 2 != 0) & (k % 2 != 0) & (l % 2 != 0)
+        diamond_forbidden = all_even & ((h + k + l) % 4 != 0)
+        allowed[diamond_forbidden] = False
+        # Also: 0kl with k+l not multiple of 4
+        h0 = (h == 0)
+        allowed[h0 & ((k + l) % 4 != 0)] = False
+
+    elif space_group == 166:  # R-3m — rhombohedral
+        # -h + k + l ≠ 3n → absent (obverse setting)
+        allowed[(-h + k + l) % 3 != 0] = False
+
+    elif space_group == 191:  # P6/mmm — simple hexagonal
+        pass  # No systematic extinctions for primitive hexagonal
+
+    # Unrecognised space groups pass through with a logged note.
+    else:
+        log.info(
+            "No extinction rules implemented for space group %d; "
+            "all %d reflections retained.",
+            space_group, len(hkls),
+        )
+
+    return allowed
+
+
 def _generate_kinematic_template_stack(
     cell: dict[str, float],
     *,
@@ -897,10 +986,25 @@ def _generate_kinematic_template_stack(
     peak_sigma_px: float,
     reciprocal_pixels_per_inv_angstrom: float | None,
     intensity_power: float,
+    space_group: int | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     hkls, qxy, qnorm, projection = _reciprocal_spots(cell, max_index, zone_axis)
     if len(hkls) == 0:
         raise ValueError("No reciprocal spots generated from CIF cell.")
+
+    # --- Apply space-group extinction filtering -------------------------------
+    n_before = len(hkls)
+    extinction_mask = _apply_extinctions(hkls, space_group)
+    hkls = hkls[extinction_mask]
+    qxy = qxy[extinction_mask]
+    qnorm = qnorm[extinction_mask]
+    n_extinct = n_before - len(hkls)
+    if n_extinct > 0:
+        log.info(
+            "Space group %s: %d/%d reflections removed by extinction rules (%d retained).",
+            space_group, n_extinct, n_before, len(hkls),
+        )
+
     detector_radius = 0.48 * min(sig_shape)
     scale = reciprocal_pixels_per_inv_angstrom
     scale_source = "config"
@@ -941,6 +1045,8 @@ def _generate_kinematic_template_stack(
         "reciprocal_pixels_per_inv_angstrom": scale,
         "reciprocal_scale_source": scale_source,
         "intensity_power": intensity_power,
+        "space_group": space_group,
+        "n_extinct_removed": n_extinct,
     }
     return stack, metadata
 
@@ -1118,6 +1224,86 @@ def _phase_confidence(best_score: float, score_margin: float | None) -> str:
     if best_score > 0.40 and score_margin > 0.08:
         return "medium"
     return "low"
+
+
+def _check_score_signs(
+    roi_results: list[ROIIndexingResult],
+    summary: dict[str, Any],
+) -> None:
+    """QC check: flag negative or near-zero template correlation scores.
+
+    Negative scores indicate the templates are anti-correlated with the
+    data — a strong signal that the matching is unphysical (e.g. wrong
+    zone axes, uncalibrated reciprocal scale, or matching against a
+    Bragg vector map instead of a mean DP).
+
+    Adds ``"score_sign_qc"`` to *summary*.
+    """
+    scored = [r for r in roi_results if r.match_score is not None]
+    if not scored:
+        summary["score_sign_qc"] = {
+            "status": "NO_SCORES",
+            "message": "No template match scores available for sign check.",
+        }
+        return
+
+    scores = [r.match_score for r in scored]
+    n_negative = sum(1 for s in scores if s < 0)
+    n_near_zero = sum(1 for s in scores if abs(s) < 0.01)
+    n_total = len(scores)
+
+    if n_negative == n_total:
+        summary["score_sign_qc"] = {
+            "status": "FAIL",
+            "severity": "critical",
+            "message": (
+                f"ALL {n_total} ROI(s) have negative template match scores "
+                f"(range [{min(scores):.4f}, {max(scores):.4f}]). "
+                "Templates are anti-correlated with the data. Likely causes: "
+                "matching against bragg_vector_map instead of mean DP "
+                "(set save_roi_data: true), uncalibrated reciprocal scale "
+                "(set reciprocal_pixels_per_inv_angstrom), or single-zone-axis "
+                "limitation (enable zone_axes)."
+            ),
+            "evidence": {
+                "n_total": n_total,
+                "n_negative": n_negative,
+                "score_min": round(min(scores), 4),
+                "score_max": round(max(scores), 4),
+            },
+        }
+    elif n_negative > 0 or n_near_zero == n_total:
+        summary["score_sign_qc"] = {
+            "status": "PASS_WITH_WARNINGS",
+            "severity": "warning",
+            "message": (
+                f"{n_negative}/{n_total} ROI(s) have negative match scores; "
+                f"{n_near_zero}/{n_total} are near zero (|score| < 0.01). "
+                "Some templates may be anti-correlated or uninformative. "
+                "Check per-ROI template_match_overlay.png for alignment."
+            ),
+            "evidence": {
+                "n_total": n_total,
+                "n_negative": n_negative,
+                "n_near_zero": n_near_zero,
+                "score_min": round(min(scores), 4),
+                "score_max": round(max(scores), 4),
+            },
+        }
+    else:
+        summary["score_sign_qc"] = {
+            "status": "PASS",
+            "severity": "info",
+            "message": (
+                f"All {n_total} ROI(s) have positive template match scores "
+                f"(range [{min(scores):.4f}, {max(scores):.4f}])."
+            ),
+            "evidence": {
+                "n_total": n_total,
+                "score_min": round(min(scores), 4),
+                "score_max": round(max(scores), 4),
+            },
+        }
 
 
 def _stage2b_status(
