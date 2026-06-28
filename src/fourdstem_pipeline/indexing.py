@@ -88,8 +88,8 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
     stage2a_summary_path = stage2_dir / "stage2_summary.json"
     stage2a_summary = json.loads(stage2a_summary_path.read_text(encoding="utf-8"))
 
-    template_cfg = _template_config(cfg.get("template_generation", {}))
-    candidates = _load_candidates(cfg.get("candidate_cifs", []), base_dir)
+    template_cfg = _template_config(cfg.get("template_generation") or {})
+    candidates = _load_candidates(cfg.get("candidate_cifs") or [], base_dir)
     accepted_rois = [
         roi for roi in stage2a_summary.get("roi_results", [])
         if is_roi_ready_for_indexing(roi)
@@ -194,7 +194,9 @@ def _load_indexing_config(config: str | Path | dict[str, Any]) -> tuple[dict[str
     return cfg, base_dir
 
 
-def _load_candidates(items: list[dict[str, Any]], base_dir: Path) -> list[IndexingCandidate]:
+def _load_candidates(items: list[dict[str, Any]] | None, base_dir: Path) -> list[IndexingCandidate]:
+    if items is None:
+        items = []
     candidates: list[IndexingCandidate] = []
     for i, item in enumerate(items):
         if not isinstance(item, dict):

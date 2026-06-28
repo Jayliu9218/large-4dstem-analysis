@@ -1140,6 +1140,42 @@ class WorkflowTests(unittest.TestCase):
         self.assertIsNone(summary["roi_results"][0]["candidate_phase"])
         self.assertEqual(summary["schema_version"], "stage2b-indexing-v2")
 
+    def test_stage2b_null_candidate_cifs_handled_gracefully(self):
+        """Null candidate_cifs (all entries commented out in YAML) is non-fatal."""
+        from fourdstem_pipeline.indexing import run_stage2_indexing
+
+        stage2_dir = self.output_dir / "stage2a_null"
+        stage2_dir.mkdir()
+        (stage2_dir / "stage2_summary.json").write_text(
+            json.dumps({
+                "run_name": "null_cifs",
+                "manifest": {"sig_shape": [32, 32]},
+                "roi_results": [
+                    {
+                        "name": "roi_good",
+                        "error": None,
+                        "n_bragg_peaks": 4,
+                        "background_fraction": 0.0,
+                        "sample_mask_coverage": 1.0,
+                        "beam_center_source": "stage1_com",
+                        "sig_shape": [32, 32],
+                        "beam_center_yx": [16.0, 16.0],
+                    },
+                ],
+            }),
+            encoding="utf-8",
+        )
+
+        summary = run_stage2_indexing({
+            "stage2_dir": str(stage2_dir),
+            "output_dir": str(self.output_dir / "stage2b_null_cifs"),
+            "candidate_cifs": None,  # simulates YAML key with all-commented entries
+        })
+
+        self.assertEqual(summary["status"], "NO_TEMPLATES")
+        self.assertEqual(summary["accepted_roi_count"], 1)
+        self.assertEqual(len(summary["candidate_cifs"]), 0)
+
     def test_stage2b_cli_entrypoint(self):
         """Stage 2B is available through the CLI module and pyproject script."""
         import io
