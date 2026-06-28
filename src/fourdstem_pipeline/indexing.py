@@ -67,6 +67,18 @@ class ROIIndexingResult:
     second_best_candidate: str | None = None
     second_best_zone_axis: list[float] | None = None
     second_best_score: float | None = None
+    # Peak-position residual metrics (v3)
+    matched_peak_count: int | None = None
+    mean_q_residual: float | None = None
+    mean_angle_residual: float | None = None
+    matched_template_fraction: float | None = None
+    unexplained_experiment_fraction: float | None = None
+    validation_status: str = "not_scored"
+    # Hybrid validation (v3)
+    matched_observable_template_fraction: float | None = None
+    hybrid_score: float | None = None
+    phase_call: str = "not_scored"
+    candidate_group: str | None = None
 
 
 def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
@@ -110,7 +122,7 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
 
     any_template = any(c.template_count > 0 for c in candidates)
     summary = {
-        "schema_version": "stage2b-indexing-v2",
+        "schema_version": "stage2b-indexing-v3",
         "stage": "2B",
         "status": _stage2b_status(accepted_rois, candidates),
         "stage2a": {
@@ -159,6 +171,16 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
                 "second_best_candidate": r.second_best_candidate,
                 "second_best_zone_axis": r.second_best_zone_axis,
                 "second_best_score": r.second_best_score,
+                "matched_peak_count": r.matched_peak_count,
+                "mean_q_residual": r.mean_q_residual,
+                "mean_angle_residual": r.mean_angle_residual,
+                "matched_template_fraction": r.matched_template_fraction,
+                "unexplained_experiment_fraction": r.unexplained_experiment_fraction,
+                "validation_status": r.validation_status,
+                "matched_observable_template_fraction": r.matched_observable_template_fraction,
+                "hybrid_score": r.hybrid_score,
+                "phase_call": r.phase_call,
+                "candidate_group": r.candidate_group,
             }
             for r in roi_results
         ],
@@ -166,6 +188,12 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
             "Stage 2B uses analytic kinematic CIF templates when lattice parameters are available.",
             "Scores are normalized template correlations on ROI mean diffraction patterns.",
             "Full structure-factor intensities and py4DSTEM/pyxem backend adapters are future extensions.",
+            "Schema v3 (stage2b-indexing-v3): Added peak-position residual metrics "
+            "(matched_peak_count, mean_q_residual, mean_angle_residual, matched_template_fraction, "
+            "unexplained_experiment_fraction). Phase confidence now uses tiers: "
+            "HIGH_CONFIDENCE / MEDIUM_CONFIDENCE / LOW_CONFIDENCE / UNINDEXED. "
+            "Validation criteria incorporate matched peak fraction and mean q residual "
+            "in addition to correlation score and margin.",
             "Schema v2: field renames — best_candidate→candidate_phase, phase_score→match_score, "
             "best_orientation_deg→orientation_candidate_deg. Removed: orientation_score, template_score "
             "(consolidated into match_score). New: best_zone_axis, score_margin, phase_confidence, "
@@ -286,6 +314,16 @@ def _merge_stage2b_results_into_stage2a_summary(
                 "phase_confidence": match.phase_confidence,
                 "second_best_candidate": match.second_best_candidate,
                 "second_best_score": match.second_best_score,
+                "matched_peak_count": match.matched_peak_count,
+                "mean_q_residual": match.mean_q_residual,
+                "mean_angle_residual": match.mean_angle_residual,
+                "matched_template_fraction": match.matched_template_fraction,
+                "unexplained_experiment_fraction": match.unexplained_experiment_fraction,
+                "validation_status": match.validation_status,
+                "matched_observable_template_fraction": match.matched_observable_template_fraction,
+                "hybrid_score": match.hybrid_score,
+                "phase_call": match.phase_call,
+                "candidate_group": match.candidate_group,
             })
         merged_rois.append(entry)
     merged["roi_results"] = merged_rois
@@ -454,12 +492,16 @@ def _generate_candidate_templates(
                 "zone_axes": template_cfg["zone_axes"],
                 "zone_axis_index": zone_axis_index,
                 "projections": [m["projection"] for m in per_zone_metadata],
+                "per_zone_hkls": [m["hkls"] for m in per_zone_metadata],
+                "per_zone_qxy": [m["qxy"] for m in per_zone_metadata],
                 "sig_shape": per_zone_metadata[0]["sig_shape"],
                 "beam_center_yx": per_zone_metadata[0]["beam_center_yx"],
                 "peak_sigma_px": per_zone_metadata[0]["peak_sigma_px"],
                 "reciprocal_pixels_per_inv_angstrom": per_zone_metadata[0]["reciprocal_pixels_per_inv_angstrom"],
                 "reciprocal_scale_source": per_zone_metadata[0]["reciprocal_scale_source"],
                 "intensity_power": per_zone_metadata[0]["intensity_power"],
+                "space_group": per_zone_metadata[0].get("space_group"),
+                "n_extinct_removed": int(sum(m.get("n_extinct_removed", 0) for m in per_zone_metadata)),
             }
         except ValueError as exc:
             log.warning("Could not generate templates for %s: %s", candidate.name, exc)
@@ -585,9 +627,8 @@ def _template_match_roi(
 
     all_hits.sort(key=lambda x: x["score"], reverse=True)
     best = all_hits[0]
-    second = _second_best_candidate_hit(all_hits, best)
 
-    # --- Save visualisations ------------------------------------------------
+    # --- Save visualisations (best by correlation) ---------------------------
     _save_match_visuals(
         roi.get("name", "unknown"),
         roi.get("bragg_summary_path", ""),
@@ -595,27 +636,147 @@ def _template_match_roi(
         best,
     )
 
+    # --- Hybrid validation: score top candidates by correlation + peaks ------
+    # Take top 3 distinct candidates by correlation for hybrid scoring.
+    seen_phases: set[str] = set()
+    top_candidates: list[dict[str, Any]] = []
+    for hit in all_hits:
+        phase_name = _candidate_display_name(hit["candidate"])
+        if phase_name not in seen_phases:
+            seen_phases.add(phase_name)
+            top_candidates.append(hit)
+        if len(top_candidates) >= 3:
+            break
+
+    hybrid_candidates: list[dict[str, Any]] = []
+    for hit in top_candidates:
+        candidate = hit["candidate"]
+        res: dict[str, Any] = {}
+        try:
+            if candidate.template_metadata_path is not None:
+                tmpl_meta = json.loads(candidate.template_metadata_path.read_text(encoding="utf-8"))
+                res = _compute_peak_residual_metrics(
+                    roi, tmpl_meta, hit["template_idx"],
+                )
+        except Exception as exc:
+            log.warning("Peak residual skipped for %s: %s", candidate.name, exc)
+
+        # Compute observable template fraction
+        observable_frac: float | None = None
+        try:
+            if candidate.template_metadata_path is not None:
+                tmpl_meta2 = json.loads(candidate.template_metadata_path.read_text(encoding="utf-8"))
+                tmpl_peaks = _reconstruct_template_peak_positions(tmpl_meta2, hit["template_idx"])
+                if tmpl_peaks is not None and len(tmpl_peaks) > 0:
+                    observable_frac = _compute_observable_template_fraction(
+                        tmpl_peaks, tuple(tmpl_meta2["sig_shape"]),
+                    )
+                    # Matched-observable = matched / (template * observable)
+                    raw_matched_frac = res.get("matched_template_fraction") or 0.0
+                    if observable_frac > 0:
+                        matched_obs = round(raw_matched_frac / observable_frac, 4)
+                    else:
+                        matched_obs = 0.0
+                else:
+                    matched_obs = None
+            else:
+                matched_obs = None
+        except Exception:
+            observable_frac = None
+            matched_obs = None
+
+        hybrid = _compute_hybrid_validation_score(
+            correlation_score=float(hit["score"]),
+            matched_observable_fraction=matched_obs,
+            mean_q_residual=res.get("mean_q_residual"),
+            unexplained_experiment_fraction=res.get("unexplained_experiment_fraction"),
+        )
+
+        hybrid_candidates.append({
+            "phase": _candidate_display_name(candidate),
+            "correlation_score": round(float(hit["score"]), 4),
+            "hybrid_score": hybrid,
+            "matched_peak_count": res.get("matched_peak_count"),
+            "mean_q_residual": res.get("mean_q_residual"),
+            "mean_angle_residual": res.get("mean_angle_residual"),
+            "matched_template_fraction": res.get("matched_template_fraction"),
+            "unexplained_experiment_fraction": res.get("unexplained_experiment_fraction"),
+            "matched_observable_template_fraction": matched_obs,
+            "observable_template_fraction": observable_frac,
+            "zone_axis": hit["zone_axis"],
+            "orientation_deg": hit["orientation_deg"],
+            "template_idx": hit["template_idx"],
+            "stack": hit["stack"],
+            "all_scores": hit["all_scores"],
+            "orientations_deg": hit["orientations_deg"],
+            "candidate_obj": candidate,
+        })
+
+    # Sort by hybrid score descending
+    hybrid_candidates.sort(key=lambda c: c["hybrid_score"], reverse=True)
+
+    # --- Resolve phase call --------------------------------------------------
+    resolution = _resolve_phase_call(best, hybrid_candidates)
+    phase_call = resolution["phase_call"]
+    candidate_group = resolution.get("candidate_group")
+    resolution_reason = resolution.get("reason", "")
+
+    # Select the reported candidate: hybrid-winner when unambiguous, else corr-winner
+    if phase_call == "AMBIGUOUS":
+        reported = hybrid_candidates[0] if hybrid_candidates else best
+    elif phase_call == "UNINDEXED":
+        reported = {"phase": None, "correlation_score": 0.0, "hybrid_score": 0.0}
+    else:
+        reported = hybrid_candidates[0]
+
+    # Best and second-best by hybrid score
+    hybrid_best = hybrid_candidates[0] if hybrid_candidates else None
+    hybrid_second = hybrid_candidates[1] if len(hybrid_candidates) > 1 else None
+
     match_score = round(float(best["score"]), 4)
-    second_best_score = round(float(second["score"]), 4) if second else None
+    second_by_corr = _second_best_candidate_hit(all_hits, best)
+    second_best_score = round(float(second_by_corr["score"]), 4) if second_by_corr else None
     score_margin = round(match_score - second_best_score, 4) if second_best_score is not None else None
-    phase_conf = _phase_confidence(match_score, score_margin)
+
+    # Use hybrid-winner's residuals for reporting
+    best_residual = hybrid_best or {}
+    obs_frac = best_residual.get("matched_observable_template_fraction")
+
+    phase_conf = _phase_confidence(
+        match_score, score_margin,
+        matched_template_fraction=obs_frac if obs_frac is not None else best_residual.get("matched_template_fraction"),
+        mean_q_residual=best_residual.get("mean_q_residual"),
+    )
+    # Downgrade to LOW_CONFIDENCE when phase is AMBIGUOUS
+    if phase_call == "AMBIGUOUS" and phase_conf in ("HIGH_CONFIDENCE", "MEDIUM_CONFIDENCE"):
+        phase_conf = "LOW_CONFIDENCE"
 
     return ROIIndexingResult(
         name=str(roi.get("name", "unknown")),
         status="TEMPLATE_MATCHED",
         stage2a_bragg_summary_path=roi.get("bragg_summary_path"),
         n_bragg_peaks=n_bragg_peaks,
-        candidate_phase=_candidate_display_name(best["candidate"]),
+        candidate_phase=(reported.get("phase") if phase_call != "AMBIGUOUS" else candidate_group),
         match_score=match_score,
         match_quality=_template_quality(match_score),
-        orientation_candidate_deg=best["orientation_deg"],
-        best_zone_axis=best["zone_axis"],
+        orientation_candidate_deg=best_residual.get("orientation_deg") or best.get("orientation_deg"),
+        best_zone_axis=best_residual.get("zone_axis") or best.get("zone_axis"),
         score_margin=score_margin,
         phase_confidence=phase_conf,
-        second_best_candidate=_candidate_display_name(second["candidate"]) if second else None,
-        second_best_zone_axis=second["zone_axis"] if second else None,
+        second_best_candidate=_candidate_display_name(second_by_corr["candidate"]) if second_by_corr else None,
+        second_best_zone_axis=second_by_corr["zone_axis"] if second_by_corr else None,
         second_best_score=second_best_score,
         scoring_mode="template_match",
+        matched_peak_count=best_residual.get("matched_peak_count"),
+        mean_q_residual=best_residual.get("mean_q_residual"),
+        mean_angle_residual=best_residual.get("mean_angle_residual"),
+        matched_template_fraction=best_residual.get("matched_template_fraction"),
+        unexplained_experiment_fraction=best_residual.get("unexplained_experiment_fraction"),
+        validation_status=phase_conf,
+        matched_observable_template_fraction=obs_frac,
+        hybrid_score=best_residual.get("hybrid_score"),
+        phase_call=phase_call,
+        candidate_group=candidate_group,
     )
 
 
@@ -957,6 +1118,14 @@ def _apply_extinctions(
         h0 = (h == 0)
         allowed[h0 & ((k + l) % 4 != 0)] = False
 
+    elif space_group == 136:  # P4_2/mnm — rutile TiO2
+        # 4_2 screw along c: 00l with l odd → absent
+        axial = (h == 0) & (k == 0)
+        allowed[axial & (l % 2 != 0)] = False
+        # n-glide ⊥ [110]: 0kl with k+l odd → absent
+        h0 = (h == 0)
+        allowed[h0 & ((k + l) % 2 != 0)] = False
+
     elif space_group == 166:  # R-3m — rhombohedral
         # -h + k + l ≠ 3n → absent (obverse setting)
         allowed[(-h + k + l) % 3 != 0] = False
@@ -1036,6 +1205,7 @@ def _generate_kinematic_template_stack(
         "max_index": max_index,
         "hkl_count": int(len(hkls)),
         "hkls": hkls.tolist(),
+        "qxy": qxy.tolist(),
         "orientations_deg": orientations_deg,
         "zone_axis": list(zone_axis),
         "projection": projection,
@@ -1088,6 +1258,390 @@ def _reciprocal_spots(
         ),
     }
     return hkls_array, qxy, np.linalg.norm(q_array, axis=1), projection
+
+
+# ---------------------------------------------------------------------------
+# Peak-position residual analysis (P0 validation)
+# ---------------------------------------------------------------------------
+
+
+def _reconstruct_template_peak_positions(
+    metadata: dict[str, Any],
+    template_idx: int,
+) -> np.ndarray | None:
+    """Return (N, 2) float64 array of template peak pixel positions [y, x].
+
+    Uses per-zone hkls/qxy from metadata when available; falls back to
+    regenerating from cell parameters for backward compatibility with
+    template files that lack per-zone persistence.
+    """
+    try:
+        orientations = metadata.get("orientations_deg", [])
+        zone_axis_index = metadata.get("zone_axis_index", [0] * len(orientations))
+        zone_axes = metadata.get("zone_axes", [[0.0, 0.0, 1.0]])
+        sig_shape = tuple(metadata["sig_shape"])
+        beam_center = tuple(metadata["beam_center_yx"])
+        scale = float(metadata["reciprocal_pixels_per_inv_angstrom"])
+        angle_deg = float(orientations[template_idx])
+        zi = int(zone_axis_index[template_idx]) if template_idx < len(zone_axis_index) else 0
+
+        per_zone_qxy = metadata.get("per_zone_qxy")
+        cell = metadata.get("cell")
+        max_index = metadata.get("max_index", 4)
+        space_group = metadata.get("space_group")
+
+        if per_zone_qxy is not None and zi < len(per_zone_qxy):
+            qxy = np.asarray(per_zone_qxy[zi], dtype=np.float64)
+        elif cell is not None and zone_axes and zi < len(zone_axes):
+            # Backward-compat fallback: regenerate from cell
+            hkls, qxy, _qnorm, _proj = _reciprocal_spots(
+                cell, int(max_index), tuple(float(v) for v in zone_axes[zi]),
+            )
+            mask = _apply_extinctions(hkls, space_group)
+            qxy = qxy[mask]
+        else:
+            return None
+
+        if len(qxy) == 0:
+            return None
+
+        rotated = _rotate_xy(qxy, angle_deg)
+        coords = np.column_stack([
+            beam_center[0] + rotated[:, 1] * scale,
+            beam_center[1] + rotated[:, 0] * scale,
+        ])
+
+        # Clip to detector bounds
+        valid = (
+            (coords[:, 0] >= 0) & (coords[:, 0] < sig_shape[0])
+            & (coords[:, 1] >= 0) & (coords[:, 1] < sig_shape[1])
+        )
+        return coords[valid].astype(np.float64)
+
+    except Exception as exc:
+        log.warning("Failed to reconstruct template peak positions: %s", exc)
+        return None
+
+
+def _extract_measured_peak_positions(
+    vmap: np.ndarray,
+    *,
+    min_intensity: float = 0.0,
+    min_spacing: int = 2,
+) -> np.ndarray:
+    """Return (M, 2) int array of measured peak pixel positions [y, x].
+
+    Finds local maxima in the Bragg vector map above *min_intensity*.
+    """
+    arr = np.asarray(vmap, dtype=np.float64)
+    if arr.size == 0 or arr.max() <= 0:
+        return np.zeros((0, 2), dtype=np.int64)
+
+    # Identify local maxima: pixel >= all neighbours within min_spacing
+    from scipy.ndimage import maximum_filter
+    footprint = np.ones((2 * min_spacing + 1, 2 * min_spacing + 1), dtype=bool)
+    local_max = arr >= maximum_filter(arr, footprint=footprint)
+    thresholded = arr > float(min_intensity)
+    peaks = local_max & thresholded
+    rows, cols = np.nonzero(peaks)
+    return np.column_stack([rows, cols]).astype(np.int64)
+
+
+def _match_peaks_residual(
+    template_peaks: np.ndarray,
+    measured_peaks: np.ndarray,
+    tolerance_px: float,
+) -> dict[str, Any]:
+    """Match template peaks to measured peaks within a radial tolerance.
+
+    Greedy closest-pair matching: each measured peak may match at most one
+    template peak.
+
+    Returns dict with matched_peak_count, mean_q_residual (px),
+    mean_angle_residual (rad), matched_template_fraction,
+    unexplained_experiment_fraction.
+    """
+    n_template = len(template_peaks)
+    n_measured = len(measured_peaks)
+
+    if n_template == 0 or n_measured == 0:
+        return {
+            "matched_peak_count": 0,
+            "mean_q_residual": None,
+            "mean_angle_residual": None,
+            "matched_template_fraction": 0.0,
+            "unexplained_experiment_fraction": 1.0 if n_measured > 0 else 0.0,
+        }
+
+    # Compute all-pairs distances
+    from scipy.spatial import cKDTree
+    tree = cKDTree(measured_peaks.astype(np.float64))
+    distances, indices = tree.query(template_peaks, distance_upper_bound=tolerance_px)
+
+    matched_mask = np.isfinite(distances)
+    matched_measured = set()
+    matched_distances: list[float] = []
+    matched_angles: list[float] = []
+
+    # Greedy assignment: sort by distance, assign closest first
+    order = np.argsort(np.where(matched_mask, distances, np.inf))
+    for i in order:
+        if not matched_mask[i]:
+            continue
+        meas_idx = indices[i]
+        if meas_idx in matched_measured:
+            continue
+        matched_measured.add(meas_idx)
+        matched_distances.append(float(distances[i]))
+        # Angular residual
+        dy = template_peaks[i, 0] - measured_peaks[meas_idx, 0]
+        dx = template_peaks[i, 1] - measured_peaks[meas_idx, 1]
+        # Angle relative to the template peak azimuth
+        t_angle = np.arctan2(
+            template_peaks[i, 0] - template_peaks[:, 0].mean(),
+            template_peaks[i, 1] - template_peaks[:, 1].mean(),
+        )
+        m_angle = np.arctan2(
+            measured_peaks[meas_idx, 0] - measured_peaks[:, 0].mean(),
+            measured_peaks[meas_idx, 1] - measured_peaks[:, 1].mean(),
+        )
+        angle_diff = abs(t_angle - m_angle)
+        angle_diff = min(angle_diff, 2 * np.pi - angle_diff)
+        matched_angles.append(float(angle_diff))
+
+    n_matched = len(matched_distances)
+    return {
+        "matched_peak_count": n_matched,
+        "mean_q_residual": round(float(np.mean(matched_distances)), 3) if n_matched else None,
+        "mean_angle_residual": round(float(np.mean(matched_angles)), 4) if n_matched else None,
+        "matched_template_fraction": round(n_matched / n_template, 4),
+        "unexplained_experiment_fraction": round((n_measured - n_matched) / max(n_measured, 1), 4),
+    }
+
+
+def _compute_peak_residual_metrics(
+    roi: dict[str, Any],
+    template_metadata: dict[str, Any],
+    best_template_idx: int,
+    *,
+    tolerance_px: float | None = None,
+) -> dict[str, Any]:
+    """Orchestrate peak residual analysis for one ROI's best match.
+
+    Loads the Bragg vector map, extracts measured peaks, reconstructs
+    template peak positions, and runs the matching.
+    """
+    result: dict[str, Any] = {
+        "matched_peak_count": None,
+        "mean_q_residual": None,
+        "mean_angle_residual": None,
+        "matched_template_fraction": None,
+        "unexplained_experiment_fraction": None,
+        "tolerance_px": None,
+        "n_template_peaks": None,
+        "n_measured_peaks": None,
+        "warning": None,
+    }
+
+    # Load Bragg vector map
+    bvm_path = roi.get("bragg_vector_map_path")
+    if not bvm_path:
+        result["warning"] = "No bragg_vector_map_path for ROI; cannot extract measured peaks."
+        return result
+    try:
+        vmap = np.load(bvm_path)
+    except OSError as exc:
+        result["warning"] = f"Could not load Bragg vector map: {exc}"
+        return result
+
+    # Handle binning mismatch (template sig_shape vs vmap shape)
+    tmpl_h, tmpl_w = template_metadata["sig_shape"]
+    vmap_h, vmap_w = vmap.shape
+    bin_y, bin_x = tmpl_h // vmap_h, tmpl_w // vmap_w
+    if bin_y > 1 and bin_x > 1 and tmpl_h % bin_y == 0 and tmpl_w % bin_x == 0:
+        bin_factor = float(bin_y)
+    else:
+        bin_factor = 1.0
+
+    sigma_px = float(template_metadata.get("peak_sigma_px", 5.0))
+    tol = tolerance_px if tolerance_px is not None else round(2.5 * sigma_px / bin_factor, 1)
+    result["tolerance_px"] = tol
+
+    # Extract measured peaks
+    measured = _extract_measured_peak_positions(vmap, min_spacing=2)
+    # Scale measured coords to template pixel space
+    if bin_factor != 1.0 and len(measured) > 0:
+        measured = (measured.astype(np.float64) * bin_factor + bin_factor / 2.0).astype(np.int64)
+    result["n_measured_peaks"] = len(measured)
+
+    # Reconstruct template peaks
+    template_peaks = _reconstruct_template_peak_positions(template_metadata, best_template_idx)
+    if template_peaks is None:
+        result["warning"] = "Could not reconstruct template peak positions."
+        return result
+    result["n_template_peaks"] = len(template_peaks)
+
+    if len(template_peaks) < 3 or len(measured) < 3:
+        result["warning"] = (
+            f"Too few peaks for reliable matching "
+            f"(template={len(template_peaks)}, measured={len(measured)})."
+        )
+        return result
+
+    match = _match_peaks_residual(template_peaks, measured, tol)
+    result.update(match)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Hybrid validation scoring and ambiguity-aware phase resolution (v3)
+# ---------------------------------------------------------------------------
+
+
+def _compute_observable_template_fraction(
+    template_peaks: np.ndarray,
+    sig_shape: tuple[int, int],
+) -> float:
+    """Return fraction of template peaks within the detector bounds.
+
+    High-q peaks that fall outside the detector are not observable at the
+    current camera length / binning — they should not count against the
+    matched fraction.
+    """
+    if len(template_peaks) == 0:
+        return 0.0
+    in_bounds = (
+        (template_peaks[:, 0] >= 0) & (template_peaks[:, 0] < sig_shape[0])
+        & (template_peaks[:, 1] >= 0) & (template_peaks[:, 1] < sig_shape[1])
+    )
+    return round(float(np.mean(in_bounds)), 4)
+
+
+def _compute_hybrid_validation_score(
+    correlation_score: float,
+    matched_observable_fraction: float | None,
+    mean_q_residual: float | None,
+    unexplained_experiment_fraction: float | None,
+) -> float:
+    """Combine correlation and peak-matching evidence into a single score [0, 1].
+
+    Weights reflect the relative reliability of each signal:
+    - Correlation score (35%): overall pattern match quality
+    - Matched observable fraction (40%): strongest discriminator for correct phase
+    - q residual penalty (15%): penalises poor positional accuracy
+    - Unexplained fraction penalty (10%): penalises many unmatched measured peaks
+    """
+    score = 0.0
+
+    # Correlation: already in [0, 1] for positive matches
+    score += 0.35 * max(0.0, float(correlation_score))
+
+    # Observable matched fraction: best single discriminator
+    mof = matched_observable_fraction if matched_observable_fraction is not None else 0.0
+    score += 0.40 * max(0.0, min(1.0, float(mof)))
+
+    # q residual: normalise to [0, 1] where 0 px → 1.0, 20+ px → 0.0
+    qr = mean_q_residual if mean_q_residual is not None else 20.0
+    qr_norm = max(0.0, 1.0 - float(qr) / 20.0)
+    score += 0.15 * qr_norm
+
+    # Unexplained fraction: lower is better
+    uf = unexplained_experiment_fraction if unexplained_experiment_fraction is not None else 1.0
+    uf_norm = max(0.0, 1.0 - float(uf))
+    score += 0.10 * uf_norm
+
+    return round(score, 4)
+
+
+def _resolve_phase_call(
+    best_by_corr: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    *,
+    hybrid_margin_threshold: float = 0.08,
+    matched_frac_threshold: float = 0.20,
+) -> dict[str, Any]:
+    """Determine the final phase call from hybrid-ranked candidates.
+
+    Returns dict with:
+    - ``phase_call``: candidate phase name, ``"AMBIGUOUS"``, or ``"UNINDEXED"``
+    - ``candidate_group``: pipe-joined phase names when AMBIGUOUS
+    - ``reason``: human-readable explanation
+    """
+    if not candidates:
+        return {"phase_call": "UNINDEXED", "candidate_group": None, "reason": "No candidates scored."}
+
+    best = candidates[0]
+    best_corr_score = float(best.get("correlation_score", 0))
+    best_hybrid = float(best.get("hybrid_score", 0))
+    best_mof = best.get("matched_observable_fraction")
+
+    # UNINDEXED: correlation too low
+    if best_corr_score <= 0.0:
+        return {
+            "phase_call": "UNINDEXED",
+            "candidate_group": None,
+            "reason": f"Best correlation score ({best_corr_score:.4f}) <= 0.",
+        }
+
+    if len(candidates) == 1:
+        return {
+            "phase_call": str(best.get("phase", "unknown")),
+            "candidate_group": None,
+            "reason": "Single candidate.",
+        }
+
+    second = candidates[1]
+    second_hybrid = float(second.get("hybrid_score", 0))
+    second_mof = second.get("matched_observable_fraction")
+    hybrid_margin = best_hybrid - second_hybrid
+
+    # AMBIGUOUS: hybrid scores too close
+    if hybrid_margin < hybrid_margin_threshold and (best_mof or 0) < matched_frac_threshold:
+        names = sorted({str(best.get("phase", "?")), str(second.get("phase", "?"))})
+        reason_parts = []
+        if best_mof and second_mof:
+            reason_parts.append(
+                f"Hybrid margin {hybrid_margin:.3f} < {hybrid_margin_threshold}, "
+                f"matched fractions {best_mof:.2%}/{second_mof:.2%}"
+            )
+        else:
+            reason_parts.append(f"Hybrid margin {hybrid_margin:.3f} < {hybrid_margin_threshold}")
+        if best.get("correlation_score", 0) < second.get("correlation_score", 0):
+            reason_parts.append(
+                f"Correlation winner ({second['phase']}) ≠ peak-matching winner ({best['phase']})"
+            )
+        return {
+            "phase_call": "AMBIGUOUS",
+            "candidate_group": " / ".join(names),
+            "reason": ". ".join(reason_parts),
+        }
+
+    # AMBIGUOUS: correlation winner ≠ hybrid (peak-matching) winner
+    corr_winner = max(candidates, key=lambda c: float(c.get("correlation_score", 0)))
+    if corr_winner.get("phase") != best.get("phase"):
+        corr_best_mof = corr_winner.get("matched_observable_fraction")
+        if corr_best_mof and best_mof and best_mof > corr_best_mof:
+            names = sorted({str(corr_winner.get("phase", "?")), str(best.get("phase", "?"))})
+            return {
+                "phase_call": "AMBIGUOUS",
+                "candidate_group": " / ".join(names),
+                "reason": (
+                    f"Correlation favours {corr_winner['phase']} "
+                    f"({corr_winner.get('correlation_score', 0):.4f}) "
+                    f"but peak matching favours {best['phase']} "
+                    f"(obs-matched {best_mof:.2%} vs {corr_best_mof:.2%})"
+                ),
+            }
+
+    # UNAMBIGUOUS
+    return {
+        "phase_call": str(best.get("phase", "unknown")),
+        "candidate_group": None,
+        "reason": (
+            f"Hybrid margin {hybrid_margin:.3f} >= {hybrid_margin_threshold}, "
+            f"obs-matched fraction {best_mof:.2%}" if best_mof else f"Hybrid margin {hybrid_margin:.3f}"
+        ),
+    }
 
 
 def _zone_projection_basis(
@@ -1195,35 +1749,55 @@ def _scale_unit_interval(image: np.ndarray) -> np.ndarray:
     return arr / max_v
 
 
+_VALIDATION_TIERS = ("UNINDEXED", "LOW_CONFIDENCE", "MEDIUM_CONFIDENCE", "HIGH_CONFIDENCE")
+
+
 def _template_quality(score: float) -> str:
-    if score >= 0.7:
+    if score >= 0.55:
         return "high"
-    if score >= 0.4:
+    if score >= 0.40:
         return "medium"
     return "low"
 
 
-def _phase_confidence(best_score: float, score_margin: float | None) -> str:
-    """Per-ROI phase confidence from template matching results.
+def _phase_confidence(
+    best_score: float,
+    score_margin: float | None,
+    matched_template_fraction: float | None = None,
+    mean_q_residual: float | None = None,
+) -> str:
+    """Per-ROI phase confidence tier (v3).
 
-    Parameters
-    ----------
-    best_score:
-        Maximum correlation across all candidates × zone axes.
-    score_margin:
-        ``best_score - second_best_score``, or *None* if only one hit exists.
+    Incorporates peak-position residuals when available.  Falls back to
+    score-only criteria when residual metrics are None (backward compat).
 
-    Returns
-    -------
-    ``"high"``, ``"medium"``, or ``"low"``
+    Returns one of ``"HIGH_CONFIDENCE"``, ``"MEDIUM_CONFIDENCE"``,
+    ``"LOW_CONFIDENCE"``, or ``"UNINDEXED"``.
     """
+    if best_score is None or best_score <= 0.0:
+        return "UNINDEXED"
     if score_margin is None:
-        return "low"
-    if best_score > 0.60 and score_margin > 0.15:
-        return "high"
-    if best_score > 0.40 and score_margin > 0.08:
-        return "medium"
-    return "low"
+        score_margin = 0.0
+
+    # HIGH_CONFIDENCE: strong score, big margin, good peak matching
+    if (
+        best_score > 0.55
+        and score_margin > 0.10
+        and (matched_template_fraction is None or matched_template_fraction > 0.50)
+        and (mean_q_residual is None or mean_q_residual < 5.0)
+    ):
+        return "HIGH_CONFIDENCE"
+
+    # MEDIUM_CONFIDENCE: adequate score and margin, acceptable peak matching
+    if (
+        best_score > 0.40
+        and score_margin > 0.06
+        and (matched_template_fraction is None or matched_template_fraction > 0.30)
+    ):
+        return "MEDIUM_CONFIDENCE"
+
+    # LOW_CONFIDENCE: scores present but below thresholds
+    return "LOW_CONFIDENCE"
 
 
 def _check_score_signs(

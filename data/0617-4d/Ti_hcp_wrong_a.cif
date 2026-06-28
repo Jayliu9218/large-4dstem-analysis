@@ -1,0 +1,9 @@
+# Ti-hcp with wrong lattice parameter a = 3.5 A (correct is 4.567 A)
+data_Ti_wrong
+_cell_length_a   3.500
+_cell_length_b   3.500
+_cell_length_c   2.826
+_cell_angle_alpha   90.0
+_cell_angle_beta   90.0
+_cell_angle_gamma   120.0
+_symmetry_Int_Tables_number   194
