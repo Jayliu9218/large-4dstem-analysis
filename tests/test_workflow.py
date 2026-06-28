@@ -942,7 +942,7 @@ class WorkflowTests(unittest.TestCase):
         stage2_dir = self.output_dir / "stage2a"
         stage2_dir.mkdir()
         cif_path = self.output_dir / "candidate.cif"
-        cif_path.write_text("data_candidate\n_cell_length_a 1.0\n", encoding="utf-8")
+        cif_path.write_text("data_candidate\n", encoding="utf-8")
         (stage2_dir / "stage2_summary.json").write_text(
             json.dumps({
                 "run_name": "mock_stage2a",
@@ -984,7 +984,7 @@ class WorkflowTests(unittest.TestCase):
         })
 
         self.assertTrue((output_dir / "stage2_indexing_summary.json").exists())
-        self.assertEqual(summary["status"], "READY_FOR_TEMPLATE_MATCHING")
+        self.assertEqual(summary["status"], "MOCK_SCORED")
         self.assertEqual(summary["accepted_roi_count"], 1)
         self.assertEqual(summary["candidate_cifs"][0]["phase"], "mock_phase")
         self.assertIsNotNone(summary["candidate_cifs"][0]["sha256"])
@@ -994,6 +994,96 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(summary["roi_results"][0]["best_candidate"], "candidate")
         self.assertEqual(summary["roi_results"][0]["phase_score"], 1.0)
         self.assertEqual(summary["roi_results"][0]["match_quality"], "mock_scored")
+
+    def test_stage2b_generates_cif_templates_and_matches_roi(self):
+        """Stage 2B generates analytic CIF templates and matches ROI mean DPs."""
+        from fourdstem_pipeline.indexing import (
+            _generate_kinematic_template_stack,
+            run_stage2_indexing,
+        )
+
+        stage2_dir = self.output_dir / "stage2a"
+        roi_dir = stage2_dir / "roi_good"
+        roi_dir.mkdir(parents=True)
+        cif_path = self.output_dir / "candidate.cif"
+        cif_path.write_text(
+            "data_candidate\n"
+            "_cell_length_a 2.0\n"
+            "_cell_length_b 2.0\n"
+            "_cell_length_c 2.0\n"
+            "_cell_angle_alpha 90\n"
+            "_cell_angle_beta 90\n"
+            "_cell_angle_gamma 90\n",
+            encoding="utf-8",
+        )
+        stack, _metadata = _generate_kinematic_template_stack(
+            {
+                "a": 2.0,
+                "b": 2.0,
+                "c": 2.0,
+                "alpha": 90.0,
+                "beta": 90.0,
+                "gamma": 90.0,
+            },
+            sig_shape=(32, 32),
+            beam_center_yx=(16.0, 16.0),
+            max_index=1,
+            orientations_deg=[0.0],
+            peak_sigma_px=1.0,
+            reciprocal_pixels_per_inv_angstrom=8.0,
+            intensity_power=2.0,
+        )
+        roi_data_path = roi_dir / "roi_data.npy"
+        np.save(roi_data_path, stack[0][None, None, :, :].astype(np.float32))
+        (stage2_dir / "stage2_summary.json").write_text(
+            json.dumps({
+                "run_name": "template_stage2a",
+                "manifest": {"sig_shape": [32, 32]},
+                "roi_results": [
+                    {
+                        "name": "roi_good",
+                        "error": None,
+                        "n_bragg_peaks": 8,
+                        "background_fraction": 0.0,
+                        "sample_mask_coverage": 1.0,
+                        "beam_center_source": "stage1_com",
+                        "beam_center_yx": [16.0, 16.0],
+                        "sig_shape": [32, 32],
+                        "roi_data_path": str(roi_data_path),
+                        "bragg_summary_path": str(roi_dir / "bragg_summary.json"),
+                    },
+                ],
+            }),
+            encoding="utf-8",
+        )
+
+        output_dir = self.output_dir / "stage2b_template"
+        summary = run_stage2_indexing({
+            "stage2_dir": str(stage2_dir),
+            "output_dir": str(output_dir),
+            "template_generation": {
+                "max_index": 1,
+                "orientations_deg": [0.0],
+                "peak_sigma_px": 1.0,
+                "reciprocal_pixels_per_inv_angstrom": 8.0,
+                "intensity_power": 2.0,
+            },
+            "candidate_cifs": [
+                {"name": "candidate", "phase": "cubic", "path": str(cif_path)}
+            ],
+        })
+
+        roi_result = summary["roi_results"][0]
+        candidate = summary["candidate_cifs"][0]
+        self.assertEqual(summary["status"], "TEMPLATE_MATCHED")
+        self.assertEqual(candidate["scoring_mode"], "template_match")
+        self.assertEqual(candidate["template_count"], 1)
+        self.assertTrue(Path(candidate["template_stack_path"]).exists())
+        self.assertEqual(roi_result["status"], "TEMPLATE_MATCHED")
+        self.assertEqual(roi_result["best_candidate"], "candidate")
+        self.assertGreater(roi_result["template_score"], 0.95)
+        self.assertEqual(roi_result["match_quality"], "high")
+        self.assertEqual(roi_result["best_orientation_deg"], 0.0)
 
     def test_stage2b_missing_candidate_cif_records_null_hash(self):
         """Missing CIF provenance is non-fatal and records sha256 as null."""

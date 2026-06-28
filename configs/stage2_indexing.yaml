@@ -10,8 +10,19 @@ stage2_dir: outputs/0617_4d_stage1/stage2/roi_bragg
 # Optional output directory. Defaults to <stage2_dir>/stage2b_indexing/.
 output_dir: null
 
-# Candidate CIFs for the next indexing implementation.
-# reference_peaks is optional and exists only for mocked contract tests.
+# Analytic CIF-to-template generation. If reciprocal_pixels_per_inv_angstrom
+# is null, templates are auto-scaled to the detector radius as a first-pass
+# indexing aid. Set it explicitly once detector calibration is known.
+template_generation:
+  max_index: 4
+  orientation_step_deg: 5
+  orientations_deg: null
+  peak_sigma_px: 1.2
+  reciprocal_pixels_per_inv_angstrom: null
+  intensity_power: 2.0
+
+# Candidate CIFs. CIFs with lattice parameters generate analytic kinematic
+# templates; reference_peaks is retained only for mocked contract tests.
 candidate_cifs:
   # - name: candidate_phase
   #   phase: unknown
