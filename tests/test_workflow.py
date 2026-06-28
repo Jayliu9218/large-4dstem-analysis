@@ -1029,6 +1029,7 @@ class WorkflowTests(unittest.TestCase):
             beam_center_yx=(16.0, 16.0),
             max_index=1,
             orientations_deg=[0.0],
+            zone_axis=(0.0, 0.0, 1.0),
             peak_sigma_px=1.0,
             reciprocal_pixels_per_inv_angstrom=8.0,
             intensity_power=2.0,
@@ -1063,6 +1064,7 @@ class WorkflowTests(unittest.TestCase):
             "output_dir": str(output_dir),
             "template_generation": {
                 "max_index": 1,
+                "zone_axis": [0, 0, 1],
                 "orientations_deg": [0.0],
                 "peak_sigma_px": 1.0,
                 "reciprocal_pixels_per_inv_angstrom": 8.0,
@@ -1079,6 +1081,10 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(candidate["scoring_mode"], "template_match")
         self.assertEqual(candidate["template_count"], 1)
         self.assertTrue(Path(candidate["template_stack_path"]).exists())
+        self.assertEqual(summary["template_generation"]["zone_axis"], [0.0, 0.0, 1.0])
+        metadata = json.loads(Path(candidate["template_metadata_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(metadata["projection"]["mode"], "single_zone_axis_orthographic")
+        self.assertEqual(metadata["projection"]["zone_axis"], [0.0, 0.0, 1.0])
         self.assertEqual(roi_result["status"], "TEMPLATE_MATCHED")
         self.assertEqual(roi_result["best_candidate"], "candidate")
         self.assertGreater(roi_result["template_score"], 0.95)

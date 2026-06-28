@@ -15,6 +15,11 @@ output_dir: null
 # indexing aid. Set it explicitly once detector calibration is known.
 template_generation:
   max_index: 4
+  # Single-zone kinematic approximation. The detector template is an
+  # orthographic projection perpendicular to this reciprocal-space direction.
+  # In-plane orientation search rotates around this axis only; grain tilt,
+  # precession, excitation error, and multi-zone coverage are not modeled.
+  zone_axis: [0, 0, 1]
   orientation_step_deg: 5
   orientations_deg: null
   peak_sigma_px: 1.2

@@ -224,6 +224,7 @@ def _generate_candidate_templates(
                 beam_center_yx=beam_center,
                 max_index=int(template_cfg["max_index"]),
                 orientations_deg=[float(v) for v in template_cfg["orientations_deg"]],
+                zone_axis=tuple(float(v) for v in template_cfg["zone_axis"]),
                 peak_sigma_px=float(template_cfg["peak_sigma_px"]),
                 reciprocal_pixels_per_inv_angstrom=template_cfg["reciprocal_pixels_per_inv_angstrom"],
                 intensity_power=float(template_cfg["intensity_power"]),
@@ -399,6 +400,7 @@ def _template_config(raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "max_index": int(raw.get("max_index", 4)),
         "orientations_deg": orientations,
+        "zone_axis": _parse_zone_axis(raw.get("zone_axis", [0, 0, 1])),
         "peak_sigma_px": float(raw.get("peak_sigma_px", 1.2)),
         "reciprocal_pixels_per_inv_angstrom": (
             None if raw.get("reciprocal_pixels_per_inv_angstrom") is None
@@ -406,6 +408,15 @@ def _template_config(raw: dict[str, Any]) -> dict[str, Any]:
         ),
         "intensity_power": float(raw.get("intensity_power", 2.0)),
     }
+
+
+def _parse_zone_axis(value: Any) -> list[float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise ValueError("template_generation.zone_axis must be [u, v, w].")
+    axis = [float(v) for v in value]
+    if float(np.linalg.norm(axis)) <= 1e-12:
+        raise ValueError("template_generation.zone_axis must be non-zero.")
+    return axis
 
 
 def _stage2_geometry(stage2a_summary: dict[str, Any], *, required: bool = True) -> dict[str, Any] | None:
@@ -490,11 +501,12 @@ def _generate_kinematic_template_stack(
     beam_center_yx: tuple[float, float],
     max_index: int,
     orientations_deg: list[float],
+    zone_axis: tuple[float, float, float],
     peak_sigma_px: float,
     reciprocal_pixels_per_inv_angstrom: float | None,
     intensity_power: float,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    hkls, qxy, qnorm = _reciprocal_spots(cell, max_index)
+    hkls, qxy, qnorm, projection = _reciprocal_spots(cell, max_index, zone_axis)
     if len(hkls) == 0:
         raise ValueError("No reciprocal spots generated from CIF cell.")
     detector_radius = 0.48 * min(sig_shape)
@@ -503,6 +515,14 @@ def _generate_kinematic_template_stack(
     if scale is None:
         scale = detector_radius / max(float(np.max(qnorm)), 1e-6)
         scale_source = "auto_fit_to_detector"
+        log.info(
+            "Auto-scaled Stage 2B reciprocal template scale to %.4f px/A^-1 "
+            "(source=%s, detector_radius_fraction=0.48, zone_axis=%s). "
+            "Set reciprocal_pixels_per_inv_angstrom for calibrated matching.",
+            scale,
+            scale_source,
+            list(zone_axis),
+        )
 
     stack = np.zeros((len(orientations_deg), sig_shape[0], sig_shape[1]), dtype=np.float32)
     for i, angle in enumerate(orientations_deg):
@@ -521,6 +541,8 @@ def _generate_kinematic_template_stack(
         "hkl_count": int(len(hkls)),
         "hkls": hkls.tolist(),
         "orientations_deg": orientations_deg,
+        "zone_axis": list(zone_axis),
+        "projection": projection,
         "sig_shape": list(sig_shape),
         "beam_center_yx": list(beam_center_yx),
         "peak_sigma_px": peak_sigma_px,
@@ -534,8 +556,10 @@ def _generate_kinematic_template_stack(
 def _reciprocal_spots(
     cell: dict[str, float],
     max_index: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    zone_axis: tuple[float, float, float],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     reciprocal = _reciprocal_basis(cell)
+    zone_unit, plane_x, plane_y = _zone_projection_basis(zone_axis)
     hkls: list[tuple[int, int, int]] = []
     q_vectors: list[np.ndarray] = []
     for h in range(-max_index, max_index + 1):
@@ -554,7 +578,36 @@ def _reciprocal_spots(
     order = np.argsort(np.linalg.norm(q_array, axis=1))
     q_array = q_array[order]
     hkls_array = hkls_array[order]
-    return hkls_array, q_array[:, :2], np.linalg.norm(q_array, axis=1)
+    qxy = np.column_stack([q_array @ plane_x, q_array @ plane_y])
+    projection = {
+        "mode": "single_zone_axis_orthographic",
+        "zone_axis": zone_unit.tolist(),
+        "plane_x": plane_x.tolist(),
+        "plane_y": plane_y.tolist(),
+        "limitations": (
+            "Single-zone kinematic approximation: in-plane rotation only; "
+            "tilt, precession, excitation error, and multi-zone coverage are not modeled."
+        ),
+    }
+    return hkls_array, qxy, np.linalg.norm(q_array, axis=1), projection
+
+
+def _zone_projection_basis(
+    zone_axis: tuple[float, float, float],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    zone = np.asarray(zone_axis, dtype=np.float64)
+    norm = float(np.linalg.norm(zone))
+    if norm <= 1e-12:
+        raise ValueError("zone_axis must be non-zero.")
+    zone_unit = zone / norm
+    reference = np.asarray([0.0, 1.0, 0.0], dtype=np.float64)
+    if abs(float(np.dot(zone_unit, reference))) > 0.95:
+        reference = np.asarray([1.0, 0.0, 0.0], dtype=np.float64)
+    plane_x = np.cross(reference, zone_unit)
+    plane_x = plane_x / max(float(np.linalg.norm(plane_x)), 1e-12)
+    plane_y = np.cross(zone_unit, plane_x)
+    plane_y = plane_y / max(float(np.linalg.norm(plane_y)), 1e-12)
+    return zone_unit, plane_x, plane_y
 
 
 def _reciprocal_basis(cell: dict[str, float]) -> np.ndarray:
