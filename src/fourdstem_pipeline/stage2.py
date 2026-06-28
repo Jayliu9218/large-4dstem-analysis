@@ -17,6 +17,7 @@ import yaml
 
 from .config import load_workflow_config
 from .contracts import Stage1Manifest, Stage1ManifestLoadError
+from .export_stage2 import build_benchmark, save_stage2_benchmark, save_stage2_report
 from .logging import configure_pipeline_logging, get_logger
 from .provenance import collect_provenance, save_provenance
 from .roi_bragg import (
@@ -209,6 +210,27 @@ def run_stage2(config: str | Path | dict[str, Any]) -> Stage2Result:
     qc_path = output_dir / "stage2_qc_summary.json"
     qc_path.write_text(json.dumps(qc, indent=2), encoding="utf-8")
 
+    # --- Report & benchmark --------------------------------------------------
+    try:
+        report_md, report_html = save_stage2_report(output_dir, summary)
+        log.info("Stage 2 report written: %s, %s", report_md, report_html)
+    except Exception as exc:
+        log.warning("Failed to generate Stage 2 report: %s", exc)
+
+    try:
+        benchmark_entries = _build_benchmark_entries(result, cfg)
+        benchmark = build_benchmark(
+            benchmark_entries,
+            time.perf_counter() - t0,  # total elapsed
+            mem=cfg.get("mem", "MEMMAP"),
+            thin_r=int(cfg.get("thin_r", 2)),
+            bin_q=int(cfg.get("bin_q", 2)),
+        )
+        bench_path = save_stage2_benchmark(output_dir, benchmark)
+        log.info("Stage 2 benchmark written: %s", bench_path)
+    except Exception as exc:
+        log.warning("Failed to generate Stage 2 benchmark: %s", exc)
+
     elapsed = time.perf_counter() - t0
     if result.n_failed > 0:
         log.warning(
@@ -342,6 +364,32 @@ def _build_stage2_summary(
         },
         "errors": result.errors if result.errors else None,
     }
+
+
+def _build_benchmark_entries(
+    result: Stage2Result,
+    cfg: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Build per-ROI benchmark entries for the benchmark JSON."""
+    entries: list[dict[str, Any]] = []
+    for r in result.roi_results:
+        entries.append({
+            "name": r.name,
+            "error": r.error,
+            "stage1_bbox": r.stage1_bbox,
+            "raw_bbox": r.raw_bbox,
+            "nav_shape": list(r.nav_shape),
+            "sig_shape": list(r.sig_shape),
+            "r_bin": result.manifest.r_bin,
+            "n_bragg_peaks": r.n_peaks,
+            "timing": {
+                "extraction_s": r.extraction_time_s,
+                "bragg_detection_s": r.bragg_time_s,
+                "total_s": r.total_time_s,
+            },
+            "roi_data_size_bytes": r.roi_data_size_bytes,
+        })
+    return entries
 
 
 def _build_stage2_qc(result: Stage2Result) -> dict[str, Any]:

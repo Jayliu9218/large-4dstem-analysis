@@ -19,6 +19,7 @@ Coordinate conventions
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -308,6 +309,11 @@ class ROIBraggResult:
     sample_mask_coverage: float | None = None
     cluster_validation_warning: str | None = None
     error: str | None = None
+    # Benchmark fields
+    extraction_time_s: float = 0.0
+    bragg_time_s: float = 0.0
+    total_time_s: float = 0.0
+    roi_data_size_bytes: int = 0
 
 
 @dataclass
@@ -657,6 +663,7 @@ def _process_one_roi(
     thin_r = max(1, int(thin_r))
     bin_q = max(1, int(bin_q))
 
+    t_extract_start = time.perf_counter()
     roi_data = np.asarray(
         cube.data[ry0:ry1:thin_r, rx0:rx1:thin_r, :, :],
         dtype=np.float32,
@@ -670,6 +677,9 @@ def _process_one_roi(
 
     sig_shape = roi_data.shape[-2:]
     nav_shape_roi = roi_data.shape[:2]
+    roi_data_size_bytes = int(roi_data.nbytes)
+    t_extract_end = time.perf_counter()
+    extraction_time_s = t_extract_end - t_extract_start
 
     # --- Cluster / background validation (on binned coords) -----------------
     cluster_validation = _validate_roi_cluster_binned(
@@ -696,6 +706,7 @@ def _process_one_roi(
 
     # --- Run Bragg disk detection -------------------------------------------
     # bragg_kwargs are already in camelCase form (converted upstream).
+    t_bragg_start = time.perf_counter()
     bragg = dc_roi.find_Bragg_disks(
         template=template,
         corrPower=float(bragg_kwargs.get("corrPower", 1.0)),
@@ -714,6 +725,8 @@ def _process_one_roi(
     bragg_vector_map_path = roi_dir / "bragg_vector_map.npy"
     np.save(bragg_vector_map_path, vmap)
     n_peaks = int(np.count_nonzero(vmap))
+    t_bragg_end = time.perf_counter()
+    bragg_time_s = t_bragg_end - t_bragg_start
 
     # --- Record the effective beam centre for this ROI ----------------------
     # After bin_Q, the beam centre coordinates change.  Record the original
@@ -760,6 +773,12 @@ def _process_one_roi(
             "data_path": data_path_str,
             "scan_shape": list(scan_shape),
         },
+        "benchmark": {
+            "extraction_time_s": round(extraction_time_s, 4),
+            "bragg_time_s": round(bragg_time_s, 4),
+            "total_time_s": round(extraction_time_s + bragg_time_s, 4),
+            "roi_data_size_bytes": roi_data_size_bytes,
+        },
     }
     bragg_summary_path = roi_dir / "bragg_summary.json"
     bragg_summary_path.write_text(
@@ -785,4 +804,8 @@ def _process_one_roi(
         background_fraction=cluster_validation.get("background_fraction"),
         sample_mask_coverage=cluster_validation.get("sample_mask_coverage"),
         cluster_validation_warning=cluster_validation.get("warning"),
+        extraction_time_s=round(extraction_time_s, 4),
+        bragg_time_s=round(bragg_time_s, 4),
+        total_time_s=round(extraction_time_s + bragg_time_s, 4),
+        roi_data_size_bytes=roi_data_size_bytes,
     )
