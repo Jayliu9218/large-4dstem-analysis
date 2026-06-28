@@ -636,3 +636,36 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (int, float, str, bool, type(None))):
         return value
     return str(value)
+
+
+# ── python -m fourdstem_pipeline.cli <subcommand> support ──────────────────────
+
+
+_SUBCOMMANDS: dict[str, str] = {
+    "run": "Execute the Stage-1 workflow",
+    "dry_run": "Validate configuration without loading data",
+    "stage2": "Execute Stage 2A ROI Bragg detection",
+}
+
+
+def _main() -> None:
+    """Dispatch ``python -m fourdstem_pipeline.cli <subcommand> ...``."""
+    if len(sys.argv) < 2 or sys.argv[1] not in _SUBCOMMANDS:
+        print(f"Usage: python -m fourdstem_pipeline.cli <subcommand> [args...]", file=sys.stderr)
+        print(f"       Subcommands: {', '.join(sorted(_SUBCOMMANDS))}", file=sys.stderr)
+        sys.exit(1)
+
+    subcommand = sys.argv[1]
+    # Remove the subcommand so the inner argparse sees only its own args.
+    sys.argv.pop(1)
+
+    if subcommand == "run":
+        run()
+    elif subcommand == "dry_run":
+        dry_run()
+    elif subcommand == "stage2":
+        stage2()
+
+
+if __name__ == "__main__":
+    _main()
