@@ -13,7 +13,7 @@ data:
   lazy: true
   cache: outputs/cache/0617_4d_stage1
   chunks:
-    navigation: [4, 4]
+    navigation: [64, 64]
     signal: [112, 112]
 
 preprocess:

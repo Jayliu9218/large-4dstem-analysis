@@ -632,6 +632,18 @@ def _navigation_block_shape(cfg: dict[str, Any], data_cfg: dict[str, Any]) -> tu
         else:
             block_shape = chunks[:2] if chunks else (8, 8)
     by, bx = [max(1, int(v)) for v in block_shape]
+    # Guard against pathologically small blocks that turn every dask
+    # .compute() call into pure scheduler overhead (thousands of 4×4
+    # chunks on a 512×512 scan → pipeline appears hung).
+    MIN_BLOCK = 16
+    if by < MIN_BLOCK or bx < MIN_BLOCK:
+        log.warning(
+            "navigation block shape (%d, %d) is very small — each block "
+            "triggers a dask .compute() call with full scheduler overhead.  "
+            "Consider setting chunks.navigation to at least [%d, %d] in your "
+            "config to avoid apparent hangs on large datasets.",
+            by, bx, max(by, MIN_BLOCK), max(bx, MIN_BLOCK),
+        )
     return by, bx
 
 
