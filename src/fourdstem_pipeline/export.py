@@ -169,6 +169,376 @@ def save_bar_png(path: str | Path, values: np.ndarray, *, size: tuple[int, int] 
     return save_png(path, canvas)
 
 
+def save_phase_match_map(
+    path: str | Path,
+    nav_shape: tuple[int, int],
+    roi_entries: list[dict[str, Any]],
+    *,
+    scale: int = 4,
+) -> Path:
+    """Render an EBSD-style navigation-space phase map.
+
+    Each navigation pixel inside a matched micro-zone/ROI is coloured by the
+    assigned candidate phase. Labels are kept out of the map body and shown
+    only in the legend so the image reads like a discrete EBSD phase map.
+
+    Parameters
+    ----------
+    path:
+        Output PNG path.
+    nav_shape:
+        Binned navigation shape ``(ny, nx)`` (the coordinate system that
+        ``stage1_bbox`` values are expressed in).
+    roi_entries:
+        List of ROI dicts.  Each must contain ``stage1_bbox`` (``[y0, y1, x0, x1]``)
+        and ``name``.  Optional Stage 2B fields: ``candidate_phase``,
+        ``match_score``, ``phase_confidence``.
+    scale:
+        Integer scale factor applied to the nav-shape canvas so text is
+        legible.  Default 4 → each binned pixel becomes a 4×4 px block.
+    """
+    return _render_ebsd_phase_map(path, nav_shape, roi_entries, scale=scale)
+
+    palette = _label_palette()
+    ny, nx = int(nav_shape[0]), int(nav_shape[1])
+    map_h, map_w = ny * scale, nx * scale
+
+    # ── Build phase → colour mapping ──────────────────────────────────
+    # Gather unique candidate phases in order of first appearance.
+    phase_order: list[str] = []
+    seen_phases: set[str] = set()
+    for r in roi_entries:
+        cp = r.get("candidate_phase")
+        if cp and cp not in seen_phases:
+            seen_phases.add(cp)
+            phase_order.append(cp)
+
+    phase_color: dict[str, np.ndarray] = {}
+    for i, ph in enumerate(phase_order):
+        phase_color[ph] = palette[i % len(palette)]
+    unmatched_color = np.asarray([210, 210, 210], dtype=np.uint8)  # light grey
+    fallback_color = np.asarray([180, 180, 180], dtype=np.uint8)
+
+    # ── Legend panel width ────────────────────────────────────────────
+    legend_w = 240 if phase_order else 0
+    canvas_w = map_w + legend_w
+    canvas_h = max(map_h, 40 + 28 * len(phase_order) + 20)
+    canvas = np.full((canvas_h, canvas_w, 3), 255, dtype=np.uint8)
+
+    # ── Draw ROI rectangles ───────────────────────────────────────────
+    for r in roi_entries:
+        bbox = r.get("stage1_bbox")
+        if bbox is None:
+            continue
+        y0, y1, x0, x1 = [int(v) for v in bbox]
+        # Clamp to nav shape
+        y0 = max(0, min(y0, ny))
+        y1 = max(0, min(y1, ny))
+        x0 = max(0, min(x0, nx))
+        x1 = max(0, min(x1, nx))
+
+        py0, py1 = y0 * scale, y1 * scale
+        px0, px1 = x0 * scale, x1 * scale
+
+        # Fill colour by phase
+        cp = r.get("candidate_phase")
+        if cp and cp in phase_color:
+            fill = phase_color[cp]
+        elif cp:
+            fill = fallback_color
+        else:
+            fill = unmatched_color
+
+        canvas[py0:py1, px0:px1] = fill
+
+        # Gold border (1 px at canvas scale)
+        border_color = np.asarray([255, 215, 0], dtype=np.uint8)
+        canvas[py0:py1, px0] = border_color
+        canvas[py0:py1, max(px1 - 1, px0)] = border_color
+        canvas[py0, px0:px1] = border_color
+        canvas[max(py1 - 1, py0), px0:px1] = border_color
+
+    # ── Draw ROI labels ───────────────────────────────────────────────
+    for r in roi_entries:
+        bbox = r.get("stage1_bbox")
+        if bbox is None:
+            continue
+        y0, _, x0, _ = [int(v) for v in bbox]
+        tx = x0 * scale + 4
+        ty = y0 * scale + 4
+
+        # Phase name + confidence
+        cp = r.get("candidate_phase")
+        pc = r.get("phase_confidence", "")
+        if cp:
+            label = cp
+            if pc and pc != "not_scored":
+                label = f"{cp} ({pc})"
+        else:
+            label = r.get("name", "?")
+        _draw_text(canvas, label, tx, ty, color=(20, 20, 20), scale=1)
+
+        # Match score on second line if available
+        ms = r.get("match_score")
+        if ms is not None:
+            score_text = f"{ms:.3f}"
+            _draw_text(canvas, score_text, tx, ty + 12, color=(80, 80, 80), scale=1)
+
+    # ── Legend ────────────────────────────────────────────────────────
+    if phase_order:
+        lx = map_w + 16
+        _draw_text(canvas, "PHASE MAP", lx, 14, color=(30, 30, 30), scale=2)
+        for row, ph in enumerate(phase_order):
+            ly = 48 + row * 28
+            color = phase_color[ph]
+            canvas[ly:ly + 14, lx:lx + 18] = color
+            _draw_text(canvas, ph, lx + 28, ly + 2, color=(30, 30, 30), scale=1)
+
+    return save_png(path, canvas)
+
+
+def save_cluster_phase_map(
+    path: str | Path,
+    labels: np.ndarray,
+    cluster_phase_entries: list[dict[str, Any]],
+    *,
+    scale: int = 1,
+    legend_path: str | Path | None = None,
+    contrast_image: np.ndarray | None = None,
+    phase_alpha: float = 0.62,
+) -> Path:
+    """Render a dense EBSD-style phase map by replacing cluster labels with phases.
+
+    ``labels`` is the Stage 1 navigation-space fingerprint-class map. Each
+    entry in ``cluster_phase_entries`` must contain ``cluster_id`` and
+    ``candidate_phase``; optional ``match_score`` is used when more than one
+    ROI matched the same cluster.
+    """
+    label_arr = np.asarray(labels)
+    if label_arr.ndim != 2:
+        raise ValueError(f"labels must be 2D, got shape {label_arr.shape!r}.")
+    scale = max(1, int(scale))
+
+    best_by_cluster: dict[int, dict[str, Any]] = {}
+    for entry in cluster_phase_entries:
+        if entry.get("cluster_id") is None or not entry.get("candidate_phase"):
+            continue
+        cluster_id = int(entry["cluster_id"])
+        score = entry.get("match_score")
+        score_value = float(score) if score is not None else -np.inf
+        previous = best_by_cluster.get(cluster_id)
+        previous_score = (
+            float(previous["match_score"])
+            if previous is not None and previous.get("match_score") is not None
+            else -np.inf
+        )
+        if previous is None or score_value >= previous_score:
+            best_by_cluster[cluster_id] = entry
+
+    phase_order: list[str] = []
+    seen_phases: set[str] = set()
+    for entry in best_by_cluster.values():
+        phase = str(entry["candidate_phase"])
+        if phase not in seen_phases:
+            seen_phases.add(phase)
+            phase_order.append(phase)
+
+    palette = _phase_palette()
+    phase_color = {
+        phase: palette[i % len(palette)]
+        for i, phase in enumerate(phase_order)
+    }
+
+    unmatched_color = np.asarray([245, 245, 245], dtype=np.uint8)
+    phase_index = np.full(label_arr.shape, -1, dtype=np.int16)
+    phase_to_index = {phase: i for i, phase in enumerate(phase_order)}
+
+    for cluster_id, entry in best_by_cluster.items():
+        phase = str(entry["candidate_phase"])
+        phase_index[label_arr == cluster_id] = phase_to_index[phase]
+
+    if contrast_image is not None:
+        contrast = np.asarray(contrast_image, dtype=np.float32)
+        if contrast.shape != label_arr.shape:
+            raise ValueError(
+                f"contrast_image shape {contrast.shape!r} does not match labels shape {label_arr.shape!r}."
+            )
+        gray = _scale_to_uint8(contrast, (1, 99))
+        nav_rgb = np.repeat(gray[..., None], 3, axis=-1)
+    else:
+        nav_rgb = np.full(label_arr.shape + (3,), unmatched_color, dtype=np.uint8)
+
+    alpha = float(np.clip(phase_alpha, 0.0, 1.0))
+    for phase, idx in phase_to_index.items():
+        mask = phase_index == idx
+        if contrast_image is None:
+            nav_rgb[mask] = phase_color[phase]
+        else:
+            color = phase_color[phase].astype(np.float32)
+            base = nav_rgb[mask].astype(np.float32)
+            nav_rgb[mask] = np.clip((1.0 - alpha) * base + alpha * color, 0, 255).astype(np.uint8)
+
+    assigned = phase_index >= 0
+    boundary = np.zeros(label_arr.shape, dtype=bool)
+    if label_arr.shape[0] > 1:
+        diff_y = assigned[1:, :] & assigned[:-1, :] & (phase_index[1:, :] != phase_index[:-1, :])
+        boundary[1:, :] |= diff_y
+        boundary[:-1, :] |= diff_y
+    if label_arr.shape[1] > 1:
+        diff_x = assigned[:, 1:] & assigned[:, :-1] & (phase_index[:, 1:] != phase_index[:, :-1])
+        boundary[:, 1:] |= diff_x
+        boundary[:, :-1] |= diff_x
+    if np.any(boundary):
+        nav_rgb[boundary] = np.clip(nav_rgb[boundary].astype(np.float32) * 0.35, 0, 255).astype(np.uint8)
+
+    map_rgb = np.repeat(np.repeat(nav_rgb, scale, axis=0), scale, axis=1)
+
+    if legend_path is not None:
+        save_phase_legend_png(legend_path, phase_order, phase_color, best_by_cluster, phase_index)
+
+    return save_png(path, map_rgb)
+
+
+def save_phase_legend_png(
+    path: str | Path,
+    phase_order: list[str],
+    phase_color: dict[str, np.ndarray],
+    best_by_cluster: dict[int, dict[str, Any]],
+    phase_index: np.ndarray,
+) -> Path:
+    """Save the legend for a dense phase map as a separate PNG."""
+    width = 360
+    height = max(96, 44 + 42 * max(len(phase_order), 1) + 20)
+    canvas = np.full((height, width, 3), 255, dtype=np.uint8)
+    _draw_text(canvas, "PHASE MAP", 16, 14, color=(30, 30, 30), scale=2)
+    for row, phase in enumerate(phase_order):
+        y = 52 + row * 42
+        canvas[y:y + 16, 16:38] = phase_color[phase]
+        _draw_text(canvas, phase, 48, y + 3, color=(30, 30, 30), scale=1)
+        clusters = [
+            str(cluster_id)
+            for cluster_id, entry in sorted(best_by_cluster.items())
+            if str(entry["candidate_phase"]) == phase
+        ]
+        idx = phase_order.index(phase)
+        pct = 100.0 * float(np.sum(phase_index == idx)) / max(int(np.sum(phase_index >= 0)), 1)
+        _draw_text(canvas, f"{pct:.1f}%  C {','.join(clusters)}", 48, y + 18, color=(90, 90, 90), scale=1)
+    return save_png(path, canvas)
+
+
+def _render_ebsd_phase_map(
+    path: str | Path,
+    nav_shape: tuple[int, int],
+    roi_entries: list[dict[str, Any]],
+    *,
+    scale: int,
+) -> Path:
+    ny, nx = int(nav_shape[0]), int(nav_shape[1])
+    if ny <= 0 or nx <= 0:
+        raise ValueError(f"nav_shape must be positive, got {nav_shape!r}.")
+    scale = max(1, int(scale))
+
+    palette = _phase_palette()
+    phase_order: list[str] = []
+    seen_phases: set[str] = set()
+    for r in roi_entries:
+        phase = r.get("candidate_phase")
+        if phase and phase not in seen_phases:
+            seen_phases.add(str(phase))
+            phase_order.append(str(phase))
+
+    phase_color = {
+        phase: palette[i % len(palette)]
+        for i, phase in enumerate(phase_order)
+    }
+    phase_to_index = {phase: i for i, phase in enumerate(phase_order)}
+
+    phase_index = np.full((ny, nx), -1, dtype=np.int16)
+    score_map = np.full((ny, nx), -np.inf, dtype=np.float32)
+
+    for r in roi_entries:
+        phase = r.get("candidate_phase")
+        if not phase:
+            continue
+        phase = str(phase)
+        if phase not in phase_to_index:
+            continue
+        bbox = r.get("stage1_bbox")
+        if bbox is None:
+            continue
+        y0, y1, x0, x1 = [int(v) for v in bbox]
+        y0 = max(0, min(y0, ny))
+        y1 = max(0, min(y1, ny))
+        x0 = max(0, min(x0, nx))
+        x1 = max(0, min(x1, nx))
+        if y1 <= y0 or x1 <= x0:
+            continue
+
+        raw_score = r.get("match_score")
+        score = float(raw_score) if raw_score is not None else 0.0
+        current = score_map[y0:y1, x0:x1]
+        update = score >= current
+        phase_index[y0:y1, x0:x1] = np.where(
+            update,
+            phase_to_index[phase],
+            phase_index[y0:y1, x0:x1],
+        )
+        score_map[y0:y1, x0:x1] = np.where(update, score, current)
+
+    unmatched_color = np.asarray([245, 245, 245], dtype=np.uint8)
+    boundary_color = np.asarray([35, 35, 35], dtype=np.uint8)
+    nav_rgb = np.full((ny, nx, 3), unmatched_color, dtype=np.uint8)
+    for phase, idx in phase_to_index.items():
+        nav_rgb[phase_index == idx] = phase_color[phase]
+
+    assigned = phase_index >= 0
+    boundary = np.zeros((ny, nx), dtype=bool)
+    if ny > 1:
+        diff_y = assigned[1:, :] & assigned[:-1, :] & (phase_index[1:, :] != phase_index[:-1, :])
+        boundary[1:, :] |= diff_y
+        boundary[:-1, :] |= diff_y
+    if nx > 1:
+        diff_x = assigned[:, 1:] & assigned[:, :-1] & (phase_index[:, 1:] != phase_index[:, :-1])
+        boundary[:, 1:] |= diff_x
+        boundary[:, :-1] |= diff_x
+    nav_rgb[boundary] = boundary_color
+
+    map_rgb = np.repeat(np.repeat(nav_rgb, scale, axis=0), scale, axis=1)
+    map_h, map_w = map_rgb.shape[:2]
+    legend_w = 260 if phase_order else 0
+    canvas_h = max(map_h, 44 + 30 * max(len(phase_order), 1) + 20)
+    canvas = np.full((canvas_h, map_w + legend_w, 3), 255, dtype=np.uint8)
+    canvas[:map_h, :map_w] = map_rgb
+
+    if phase_order:
+        lx = map_w + 16
+        _draw_text(canvas, "PHASE MAP", lx, 14, color=(30, 30, 30), scale=2)
+        for row, phase in enumerate(phase_order):
+            ly = 52 + row * 30
+            canvas[ly:ly + 16, lx:lx + 22] = phase_color[phase]
+            _draw_text(canvas, phase, lx + 32, ly + 3, color=(30, 30, 30), scale=1)
+
+    return save_png(path, canvas)
+
+
+def _phase_palette() -> np.ndarray:
+    """High-contrast discrete colours for EBSD-style phase maps."""
+    return np.asarray(
+        [
+            [46, 117, 182],
+            [214, 73, 51],
+            [76, 153, 77],
+            [128, 88, 177],
+            [230, 159, 0],
+            [0, 158, 115],
+            [86, 180, 233],
+            [204, 121, 167],
+            [110, 110, 110],
+        ],
+        dtype=np.uint8,
+    )
+
+
 def _label_palette() -> np.ndarray:
     return np.asarray(
         [
@@ -228,7 +598,11 @@ def _draw_text(canvas: np.ndarray, text: str, x: int, y: int, *, color: tuple[in
                 if bit == "1":
                     y0 = y + gy * scale
                     x0 = cursor + gx * scale
-                    canvas[y0 : y0 + scale, x0 : x0 + scale] = color
+                    y1 = y0 + scale
+                    x1 = x0 + scale
+                    if y1 <= 0 or x1 <= 0 or y0 >= canvas.shape[0] or x0 >= canvas.shape[1]:
+                        continue
+                    canvas[max(y0, 0) : min(y1, canvas.shape[0]), max(x0, 0) : min(x1, canvas.shape[1])] = color
         cursor += 6 * scale
 
 
@@ -759,18 +1133,38 @@ _FONT_5X7 = {
     "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
     "9": ["01110", "10001", "10001", "01111", "00001", "00001", "01110"],
     "A": ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
+    "B": ["11110", "10001", "10001", "11110", "10001", "10001", "11110"],
     "C": ["01110", "10001", "10000", "10000", "10000", "10001", "01110"],
+    "D": ["11110", "10001", "10001", "10001", "10001", "10001", "11110"],
     "E": ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
+    "F": ["11111", "10000", "10000", "11110", "10000", "10000", "10000"],
+    "G": ["01110", "10001", "10000", "10111", "10001", "10001", "01111"],
     "H": ["10001", "10001", "10001", "11111", "10001", "10001", "10001"],
     "I": ["01110", "00100", "00100", "00100", "00100", "00100", "01110"],
+    "J": ["00111", "00010", "00010", "00010", "10010", "10010", "01100"],
+    "K": ["10001", "10010", "10100", "11000", "10100", "10010", "10001"],
     "L": ["10000", "10000", "10000", "10000", "10000", "10000", "11111"],
+    "M": ["10001", "11011", "10101", "10101", "10001", "10001", "10001"],
     "N": ["10001", "11001", "10101", "10011", "10001", "10001", "10001"],
+    "O": ["01110", "10001", "10001", "10001", "10001", "10001", "01110"],
     "P": ["11110", "10001", "10001", "11110", "10000", "10000", "10000"],
+    "Q": ["01110", "10001", "10001", "10001", "10101", "10010", "01101"],
     "R": ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
     "S": ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
     "T": ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
     "U": ["10001", "10001", "10001", "10001", "10001", "10001", "01110"],
+    "V": ["10001", "10001", "10001", "10001", "10001", "01010", "00100"],
+    "W": ["10001", "10001", "10001", "10101", "10101", "10101", "01010"],
+    "X": ["10001", "10001", "01010", "00100", "01010", "10001", "10001"],
+    "Y": ["10001", "10001", "01010", "00100", "00100", "00100", "00100"],
+    "Z": ["11111", "00001", "00010", "00100", "01000", "10000", "11111"],
     "=": ["00000", "11111", "00000", "00000", "11111", "00000", "00000"],
+    "-": ["00000", "00000", "00000", "11111", "00000", "00000", "00000"],
+    "_": ["00000", "00000", "00000", "00000", "00000", "00000", "11111"],
+    ".": ["00000", "00000", "00000", "00000", "00000", "01100", "01100"],
+    ":": ["00000", "01100", "01100", "00000", "01100", "01100", "00000"],
+    "(": ["00010", "00100", "01000", "01000", "01000", "00100", "00010"],
+    ")": ["01000", "00100", "00010", "00010", "00010", "00100", "01000"],
 }
 
 

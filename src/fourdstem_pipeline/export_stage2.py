@@ -590,7 +590,12 @@ _GALLERY_PNG_SPEC: list[tuple[str, str]] = [
 ]
 
 
-def save_stage2_gallery(output_dir: Path, summary: dict[str, Any]) -> Path | None:
+def save_stage2_gallery(
+    output_dir: Path,
+    summary: dict[str, Any],
+    *,
+    global_pngs: list[dict[str, str]] | None = None,
+) -> Path | None:
     """Generate ``stage2_gallery.html`` with per-ROI detail and cross-ROI comparisons.
 
     PNGs are referenced via relative ``<img src>`` paths — the HTML file must
@@ -602,6 +607,10 @@ def save_stage2_gallery(output_dir: Path, summary: dict[str, Any]) -> Path | Non
         Stage 2 output directory (where ``stage2_summary.json`` lives).
     summary:
         The ``stage2_summary.json`` dict (must contain ``roi_results``).
+    global_pngs:
+        Optional list of ``{"path": ..., "caption": ...}`` dicts for overview
+        PNGs that are not per-ROI (e.g. a phase match map).  Rendered in a
+        "Global Overview" section at the top of the gallery.
 
     Returns
     -------
@@ -670,6 +679,7 @@ def save_stage2_gallery(output_dir: Path, summary: dict[str, Any]) -> Path | Non
         roi_galleries=roi_galleries,
         comparison_groups=comparison_groups,
         comp_order=comp_order,
+        global_pngs=_resolve_global_pngs(global_pngs, output_dir),
     )
     gallery_path = output_dir / "stage2_gallery.html"
     gallery_path.write_text(html, encoding="utf-8")
@@ -683,6 +693,26 @@ def _rel_path(base: Path, target: Path) -> str:
     except ValueError:
         return target.as_posix()
     return rel.as_posix()
+
+
+def _resolve_global_pngs(
+    global_pngs: list[dict[str, str]] | None,
+    base: Path,
+) -> list[dict[str, str]]:
+    """Resolve global PNG paths to relative URLs and filter to files that exist."""
+    if not global_pngs:
+        return []
+    resolved: list[dict[str, str]] = []
+    for entry in global_pngs:
+        p = Path(entry["path"])
+        if not p.is_file():
+            continue
+        resolved.append({
+            "rel_path": _rel_path(base, p),
+            "caption": entry.get("caption", p.stem),
+            "filename": p.name,
+        })
+    return resolved
 
 
 def _roi_meta_label(r: dict[str, Any]) -> str:
@@ -774,6 +804,15 @@ h3 { color: #333; margin-top: 24px; }
     padding: 4px 10px; font-size: 0.75em; color: #777;
     background: #f8f8f8; border-top: 1px solid #eee;
 }
+
+/* ── Global overview ── */
+.global-section {
+    background: #fff; border: 1px solid #ddd; border-radius: 6px;
+    padding: 20px; margin-bottom: 24px; text-align: center;
+}
+.global-section img {
+    max-width: 100%; height: auto; border: 1px solid #eee; border-radius: 2px;
+}
 """
 
 
@@ -786,8 +825,11 @@ def _render_gallery_html(
     roi_galleries: list[dict[str, Any]],
     comparison_groups: dict[str, list[dict[str, str]]],
     comp_order: list[str],
+    global_pngs: list[dict[str, str]] | None = None,
 ) -> str:
     """Render the full gallery HTML."""
+    global_list = global_pngs or []
+
     p: list[str] = []
     p.append("<!DOCTYPE html>")
     p.append('<html lang="en"><head>')
@@ -802,6 +844,17 @@ def _render_gallery_html(
     p.append(f"Stage 1: <code>{stage1_dir}</code><br>")
     p.append(f"ROIs with images: {n_rois} · Total PNGs: {total_pngs}")
     p.append("</div>")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 0 — Global overview (phase match map, etc.)
+    # ══════════════════════════════════════════════════════════════════════
+    if global_list:
+        p.append("<h2>Global Overview</h2>")
+        for gp in global_list:
+            p.append('<div class="global-section">')
+            p.append(f'<img src="{gp["rel_path"]}" alt="{gp["filename"]}" loading="lazy" style="max-width:100%;height:auto;">')
+            p.append(f'<div class="png-caption">{gp["caption"]}</div>')
+            p.append("</div>")
 
     # Table of contents
     p.append('<div class="toc"><strong>Jump to ROI:</strong> ')

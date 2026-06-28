@@ -41,7 +41,9 @@ template_generation:
 # Candidate CIFs. CIFs with lattice parameters generate analytic kinematic
 # templates; reference_peaks is retained only for mocked contract tests.
 candidate_cifs:
-  # - name: candidate_phase
-  #   phase: unknown
-  #   path: data/cifs/candidate_phase.cif
-  #   reference_peaks: []
+  - name: Ti_hcp
+    phase: Ti-hcp
+    path: data/0617-4d/Ti-hcp.cif
+  - name: Ti_bcc
+    phase: Ti-bcc
+    path: data/0617-4d/Ti-bcc.cif

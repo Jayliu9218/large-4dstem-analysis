@@ -1092,7 +1092,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(metadata["projections"][0]["mode"], "single_zone_axis_orthographic")
         self.assertEqual(metadata["projections"][0]["zone_axis"], [0.0, 0.0, 1.0])
         self.assertEqual(roi_result["status"], "TEMPLATE_MATCHED")
-        self.assertEqual(roi_result["candidate_phase"], "candidate")
+        self.assertEqual(roi_result["candidate_phase"], "cubic")
         self.assertGreater(roi_result["match_score"], 0.95)
         self.assertEqual(roi_result["match_quality"], "high")
         self.assertEqual(roi_result["orientation_candidate_deg"], 0.0)
@@ -1101,6 +1101,9 @@ class WorkflowTests(unittest.TestCase):
         # Single candidate → no second-best
         self.assertIsNone(roi_result["second_best_candidate"])
         self.assertIsNone(roi_result["score_margin"])
+        gallery_html = (stage2_dir / "stage2_gallery.html").read_text(encoding="utf-8")
+        self.assertIn("cubic", gallery_html)
+        self.assertIn("score:1.000", gallery_html)
 
     def test_stage2b_missing_candidate_cif_records_null_hash(self):
         """Missing CIF provenance is non-fatal and records sha256 as null."""
@@ -1139,6 +1142,82 @@ class WorkflowTests(unittest.TestCase):
         self.assertIsNone(summary["roi_results"][0]["match_score"])
         self.assertIsNone(summary["roi_results"][0]["candidate_phase"])
         self.assertEqual(summary["schema_version"], "stage2b-indexing-v2")
+
+    def test_stage2b_matches_from_bragg_vector_map_without_roi_data(self):
+        """Stage 2B still template-matches when Stage 2A skipped roi_data.npy."""
+        from fourdstem_pipeline.indexing import (
+            _generate_kinematic_template_stack,
+            run_stage2_indexing,
+        )
+
+        stage2_dir = self.output_dir / "stage2a_no_roi_data"
+        roi_dir = stage2_dir / "roi_good"
+        roi_dir.mkdir(parents=True)
+        cif_path = self.output_dir / "candidate_no_roi_data.cif"
+        cif_path.write_text(
+            "data_candidate\n"
+            "_cell_length_a 2.0\n"
+            "_cell_length_b 2.0\n"
+            "_cell_length_c 2.0\n"
+            "_cell_angle_alpha 90\n"
+            "_cell_angle_beta 90\n"
+            "_cell_angle_gamma 90\n",
+            encoding="utf-8",
+        )
+        stack, _ = _generate_kinematic_template_stack(
+            {"a": 2.0, "b": 2.0, "c": 2.0, "alpha": 90.0, "beta": 90.0, "gamma": 90.0},
+            sig_shape=(32, 32),
+            beam_center_yx=(16.0, 16.0),
+            max_index=1,
+            orientations_deg=[0.0],
+            zone_axis=(0.0, 0.0, 1.0),
+            peak_sigma_px=1.0,
+            reciprocal_pixels_per_inv_angstrom=8.0,
+            intensity_power=2.0,
+        )
+        bragg_map_path = roi_dir / "bragg_vector_map.npy"
+        np.save(bragg_map_path, stack[0].astype(np.float32))
+        (stage2_dir / "stage2_summary.json").write_text(
+            json.dumps({
+                "run_name": "no_roi_data_stage2a",
+                "manifest": {"sig_shape": [32, 32]},
+                "roi_results": [{
+                    "name": "roi_good",
+                    "error": None,
+                    "n_bragg_peaks": 8,
+                    "background_fraction": 0.0,
+                    "sample_mask_coverage": 1.0,
+                    "beam_center_source": "stage1_com",
+                    "beam_center_yx": [16.0, 16.0],
+                    "sig_shape": [32, 32],
+                    "roi_data_path": None,
+                    "bragg_vector_map_path": str(bragg_map_path),
+                    "bragg_summary_path": str(roi_dir / "bragg_summary.json"),
+                }],
+            }),
+            encoding="utf-8",
+        )
+
+        summary = run_stage2_indexing({
+            "stage2_dir": str(stage2_dir),
+            "output_dir": str(self.output_dir / "stage2b_no_roi_data"),
+            "template_generation": {
+                "max_index": 1,
+                "zone_axis": [0, 0, 1],
+                "orientations_deg": [0.0],
+                "peak_sigma_px": 1.0,
+                "reciprocal_pixels_per_inv_angstrom": 8.0,
+                "intensity_power": 2.0,
+            },
+            "candidate_cifs": [
+                {"name": "candidate", "phase": "cubic", "path": str(cif_path)}
+            ],
+        })
+
+        roi_result = summary["roi_results"][0]
+        self.assertEqual(roi_result["status"], "TEMPLATE_MATCHED")
+        self.assertEqual(roi_result["candidate_phase"], "cubic")
+        self.assertGreater(roi_result["match_score"], 0.95)
 
     def test_stage2b_null_candidate_cifs_handled_gracefully(self):
         """Null candidate_cifs (all entries commented out in YAML) is non-fatal."""
@@ -1392,14 +1471,85 @@ class WorkflowTests(unittest.TestCase):
         })
 
         roi_result = summary["roi_results"][0]
-        self.assertEqual(roi_result["candidate_phase"], "cand_a")
+        self.assertEqual(roi_result["candidate_phase"], "cubic_2A")
         self.assertGreater(roi_result["match_score"], 0.95)
         # Candidate A should win by a large margin → high confidence
         self.assertEqual(roi_result["phase_confidence"], "high")
         self.assertIsNotNone(roi_result["score_margin"])
         self.assertGreater(roi_result["score_margin"], 0.15)
-        self.assertEqual(roi_result["second_best_candidate"], "cand_b")
+        self.assertEqual(roi_result["second_best_candidate"], "cubic_5A")
         self.assertIsNotNone(roi_result["second_best_score"])
+
+    def test_stage2b_score_margin_uses_competing_candidate_not_orientation(self):
+        """Score margin compares phase candidates, not symmetry-equivalent orientations."""
+        from fourdstem_pipeline.indexing import (
+            _generate_kinematic_template_stack,
+            run_stage2_indexing,
+        )
+
+        stage2_dir = self.output_dir / "stage2a_margin"
+        roi_dir = stage2_dir / "roi_good"
+        roi_dir.mkdir(parents=True)
+        cif_a = self.output_dir / "margin_a.cif"
+        cif_a.write_text(
+            "data_A\n_cell_length_a 2.0\n_cell_length_b 2.0\n_cell_length_c 2.0\n"
+            "_cell_angle_alpha 90\n_cell_angle_beta 90\n_cell_angle_gamma 90\n",
+            encoding="utf-8",
+        )
+        cif_b = self.output_dir / "margin_b.cif"
+        cif_b.write_text(
+            "data_B\n_cell_length_a 5.0\n_cell_length_b 5.0\n_cell_length_c 5.0\n"
+            "_cell_angle_alpha 90\n_cell_angle_beta 90\n_cell_angle_gamma 90\n",
+            encoding="utf-8",
+        )
+
+        stack_a, _ = _generate_kinematic_template_stack(
+            {"a": 2.0, "b": 2.0, "c": 2.0, "alpha": 90.0, "beta": 90.0, "gamma": 90.0},
+            sig_shape=(32, 32), beam_center_yx=(16.0, 16.0),
+            max_index=1, orientations_deg=[0.0],
+            zone_axis=(0.0, 0.0, 1.0),
+            peak_sigma_px=1.0, reciprocal_pixels_per_inv_angstrom=8.0,
+            intensity_power=2.0,
+        )
+        roi_data_path = roi_dir / "roi_data.npy"
+        np.save(roi_data_path, stack_a[0][None, None, :, :].astype(np.float32))
+        (stage2_dir / "stage2_summary.json").write_text(
+            json.dumps({
+                "run_name": "margin_stage2a",
+                "manifest": {"sig_shape": [32, 32]},
+                "roi_results": [{
+                    "name": "roi_good", "error": None, "n_bragg_peaks": 8,
+                    "background_fraction": 0.0, "sample_mask_coverage": 1.0,
+                    "beam_center_source": "stage1_com",
+                    "beam_center_yx": [16.0, 16.0], "sig_shape": [32, 32],
+                    "roi_data_path": str(roi_data_path),
+                    "bragg_summary_path": str(roi_dir / "bragg_summary.json"),
+                }],
+            }),
+            encoding="utf-8",
+        )
+
+        summary = run_stage2_indexing({
+            "stage2_dir": str(stage2_dir),
+            "output_dir": str(self.output_dir / "stage2b_margin"),
+            "template_generation": {
+                "max_index": 1,
+                "zone_axis": [0, 0, 1],
+                "orientations_deg": [0.0, 90.0],
+                "peak_sigma_px": 1.0,
+                "reciprocal_pixels_per_inv_angstrom": 8.0,
+                "intensity_power": 2.0,
+            },
+            "candidate_cifs": [
+                {"name": "cand_a", "phase": "phase_a", "path": str(cif_a)},
+                {"name": "cand_b", "phase": "phase_b", "path": str(cif_b)},
+            ],
+        })
+
+        roi_result = summary["roi_results"][0]
+        self.assertEqual(roi_result["candidate_phase"], "phase_a")
+        self.assertEqual(roi_result["second_best_candidate"], "phase_b")
+        self.assertGreater(roi_result["score_margin"], 0.15)
 
     def test_stage2b_backward_compat_zone_axis_singular(self):
         """zone_axis (singular) produces same result as zone_axes with one entry."""

@@ -20,7 +20,7 @@ import numpy as np
 import yaml
 
 from .contracts import is_roi_ready_for_indexing
-from .export import save_bar_png, save_png
+from .export import save_bar_png, save_cluster_phase_map, save_phase_match_map, save_png
 
 log = logging.getLogger(__name__)
 
@@ -176,17 +176,178 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
     summary_path = output_dir / "stage2_indexing_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
 
+    # --- Phase match map (navigation-space overview) --------------------
+    phase_map_path: Path | None = None
+    phase_legend_path: Path | None = None
+    try:
+        labels = _load_stage1_label_map(stage2a_summary)
+        contrast_image = _load_stage1_contrast_image(stage2a_summary, labels.shape if labels is not None else None)
+        if labels is not None and accepted_rois:
+            cluster_phase_entries = []
+            result_by_name = {r.name: r for r in roi_results}
+            for s2a_roi in accepted_rois:
+                result = result_by_name.get(str(s2a_roi.get("name", "")))
+                if result is None:
+                    continue
+                cluster_phase_entries.append({
+                    "name": s2a_roi.get("name", "unknown"),
+                    "cluster_id": s2a_roi.get("cluster_id"),
+                    "candidate_phase": result.candidate_phase,
+                    "match_score": result.match_score,
+                    "phase_confidence": result.phase_confidence,
+                })
+            phase_map_path = save_cluster_phase_map(
+                output_dir / "phase_match_map.png",
+                labels,
+                cluster_phase_entries,
+                legend_path=output_dir / "phase_match_legend.png",
+                contrast_image=contrast_image,
+            )
+            phase_legend_path = output_dir / "phase_match_legend.png"
+            log.info("Dense cluster phase map saved: %s", phase_map_path)
+        else:
+            nav_shape = stage2a_summary.get("manifest", {}).get("nav_shape")
+            if not (nav_shape and accepted_rois):
+                nav_shape = None
+        if phase_map_path is None and nav_shape and accepted_rois:
+            # Merge stage2a bboxes with stage2b match results.
+            phase_map_entries: list[dict[str, Any]] = []
+            for s2a_roi in accepted_rois:
+                entry: dict[str, Any] = {
+                    "name": s2a_roi.get("name", "unknown"),
+                    "stage1_bbox": s2a_roi.get("stage1_bbox"),
+                }
+                # Find matching Stage 2B result.
+                for r in roi_results:
+                    if r.name == entry["name"]:
+                        entry["candidate_phase"] = r.candidate_phase
+                        entry["match_score"] = r.match_score
+                        entry["phase_confidence"] = r.phase_confidence
+                        break
+                phase_map_entries.append(entry)
+
+            phase_map_path = save_phase_match_map(
+                output_dir / "phase_match_map.png",
+                (int(nav_shape[0]), int(nav_shape[1])),
+                phase_map_entries,
+            )
+            log.info("Phase match map saved: %s", phase_map_path)
+    except Exception as exc:
+        log.warning("Failed to generate phase match map: %s", exc)
+
     # --- Update the Stage 2 PNG gallery (now includes Stage 2B match PNGs) ---
     try:
         from .export_stage2 import save_stage2_gallery
 
-        gallery_path = save_stage2_gallery(stage2_dir, stage2a_summary)
+        gallery_summary = _merge_stage2b_results_into_stage2a_summary(stage2a_summary, roi_results)
+        gallery_path = save_stage2_gallery(
+            stage2_dir, gallery_summary,
+            global_pngs=(
+                [
+                    {"path": str(phase_map_path), "caption": "Phase Map - Stage 1 cluster labels replaced by matched Stage 2B phases"},
+                    {"path": str(phase_legend_path), "caption": "Phase Map Legend"},
+                ]
+                if phase_map_path and phase_map_path.is_file() else None
+            ),
+        )
         if gallery_path is not None:
             log.info("Stage 2 PNG gallery updated: %s", gallery_path)
     except Exception as exc:
         log.warning("Failed to update Stage 2 PNG gallery: %s", exc)
 
     return summary
+
+
+def _merge_stage2b_results_into_stage2a_summary(
+    stage2a_summary: dict[str, Any],
+    roi_results: list[ROIIndexingResult],
+) -> dict[str, Any]:
+    """Return a Stage 2A-like summary enriched with Stage 2B match metadata."""
+    by_name = {r.name: r for r in roi_results}
+    merged = dict(stage2a_summary)
+    merged_rois: list[dict[str, Any]] = []
+    for roi in stage2a_summary.get("roi_results", []):
+        entry = dict(roi)
+        match = by_name.get(str(entry.get("name", "")))
+        if match is not None:
+            entry.update({
+                "stage2b_status": match.status,
+                "candidate_phase": match.candidate_phase,
+                "match_score": match.match_score,
+                "match_quality": match.match_quality,
+                "orientation_candidate_deg": match.orientation_candidate_deg,
+                "best_zone_axis": match.best_zone_axis,
+                "score_margin": match.score_margin,
+                "phase_confidence": match.phase_confidence,
+                "second_best_candidate": match.second_best_candidate,
+                "second_best_score": match.second_best_score,
+            })
+        merged_rois.append(entry)
+    merged["roi_results"] = merged_rois
+    return merged
+
+
+def _load_stage1_label_map(stage2a_summary: dict[str, Any]) -> np.ndarray | None:
+    """Load the Stage 1 fingerprint-class labels used for dense phase maps."""
+    stage1_dir_raw = stage2a_summary.get("stage1_dir")
+    if not stage1_dir_raw:
+        return None
+    stage1_dir = Path(stage1_dir_raw)
+    stage1_summary_path = stage1_dir / "stage1_summary.json"
+    try:
+        stage1_summary = json.loads(stage1_summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("Could not load Stage 1 summary for phase map: %s", exc)
+        return None
+
+    labels_path_raw = stage1_summary.get("labels_path")
+    if not labels_path_raw:
+        return None
+    labels_path = Path(labels_path_raw)
+    if not labels_path.is_absolute():
+        labels_path = stage1_dir / labels_path
+    try:
+        labels = np.load(labels_path)
+    except OSError as exc:
+        log.warning("Could not load Stage 1 labels for phase map: %s", exc)
+        return None
+    if labels.ndim != 2:
+        log.warning("Stage 1 labels for phase map must be 2D, got shape %s", labels.shape)
+        return None
+    return labels
+
+
+def _load_stage1_contrast_image(
+    stage2a_summary: dict[str, Any],
+    expected_shape: tuple[int, int] | None,
+) -> np.ndarray | None:
+    """Load a Stage 1 virtual image for EBSD-like phase-map contrast."""
+    stage1_dir_raw = stage2a_summary.get("stage1_dir")
+    if not stage1_dir_raw:
+        return None
+    stage1_dir = Path(stage1_dir_raw)
+    stage1_summary_path = stage1_dir / "stage1_summary.json"
+    try:
+        stage1_summary = json.loads(stage1_summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    virtual_path_raw = stage1_summary.get("virtual_images_path")
+    if not virtual_path_raw:
+        return None
+    virtual_path = Path(virtual_path_raw)
+    if not virtual_path.is_absolute():
+        virtual_path = stage1_dir / virtual_path
+    try:
+        with np.load(virtual_path) as virtual:
+            for key in ("adf", "haadf", "bf"):
+                if key in virtual:
+                    image = np.asarray(virtual[key], dtype=np.float32)
+                    if expected_shape is None or image.shape == expected_shape:
+                        return image
+    except OSError as exc:
+        log.warning("Could not load Stage 1 virtual images for phase map contrast: %s", exc)
+    return None
 
 
 def _load_indexing_config(config: str | Path | dict[str, Any]) -> tuple[dict[str, Any], Path]:
@@ -340,16 +501,9 @@ def _template_match_roi(
     candidates: list[IndexingCandidate],
     n_bragg_peaks: int,
 ) -> ROIIndexingResult | None:
-    roi_data_path = roi.get("roi_data_path")
-    if not roi_data_path:
+    mean_dp = _load_roi_match_pattern(roi)
+    if mean_dp is None:
         return None
-    try:
-        roi_data = np.load(roi_data_path)
-    except OSError as exc:
-        log.warning("Could not load ROI data for %s: %s", roi.get("name", "unknown"), exc)
-        return None
-
-    mean_dp = _mean_diffraction_pattern(roi_data)
     pattern_vec = _normalize_pattern(mean_dp)
     if pattern_vec is None:
         return None
@@ -364,6 +518,26 @@ def _template_match_roi(
         except (OSError, json.JSONDecodeError) as exc:
             log.warning("Could not load templates for %s: %s", candidate.name, exc)
             continue
+
+        # Bin templates to match the data resolution when necessary
+        # (templates are generated at the pre-Q-bin sig_shape; the actual
+        # ROI data / Bragg vector map may be at a binned resolution).
+        tmpl_h, tmpl_w = stack.shape[1], stack.shape[2]
+        data_h, data_w = mean_dp.shape
+        if tmpl_h != data_h or tmpl_w != data_w:
+            bin_y = tmpl_h // data_h
+            bin_x = tmpl_w // data_w
+            if bin_y > 1 and bin_x > 1 and tmpl_h % bin_y == 0 and tmpl_w % bin_x == 0:
+                stack = stack.reshape(
+                    stack.shape[0], data_h, bin_y, data_w, bin_x,
+                ).mean(axis=(2, 4))
+            else:
+                log.warning(
+                    "Template shape %s cannot be binned to match data shape %s for %s",
+                    (tmpl_h, tmpl_w), (data_h, data_w), candidate.name,
+                )
+                continue
+
         flat_templates = stack.reshape((stack.shape[0], -1))
         normalized = [
             vec for vec in (_normalize_pattern(t.reshape(mean_dp.shape)) for t in flat_templates)
@@ -398,7 +572,7 @@ def _template_match_roi(
 
     all_hits.sort(key=lambda x: x["score"], reverse=True)
     best = all_hits[0]
-    second = all_hits[1] if len(all_hits) > 1 else None
+    second = _second_best_candidate_hit(all_hits, best)
 
     # --- Save visualisations ------------------------------------------------
     _save_match_visuals(
@@ -418,18 +592,66 @@ def _template_match_roi(
         status="TEMPLATE_MATCHED",
         stage2a_bragg_summary_path=roi.get("bragg_summary_path"),
         n_bragg_peaks=n_bragg_peaks,
-        candidate_phase=best["candidate"].name,
+        candidate_phase=_candidate_display_name(best["candidate"]),
         match_score=match_score,
         match_quality=_template_quality(match_score),
         orientation_candidate_deg=best["orientation_deg"],
         best_zone_axis=best["zone_axis"],
         score_margin=score_margin,
         phase_confidence=phase_conf,
-        second_best_candidate=second["candidate"].name if second else None,
+        second_best_candidate=_candidate_display_name(second["candidate"]) if second else None,
         second_best_zone_axis=second["zone_axis"] if second else None,
         second_best_score=second_best_score,
         scoring_mode="template_match",
     )
+
+
+def _load_roi_match_pattern(roi: dict[str, Any]) -> np.ndarray | None:
+    """Load the numeric pattern used for template matching.
+
+    Prefer the ROI mean diffraction pattern when ``roi_data.npy`` was kept.
+    If Stage 2A ran with ``save_roi_data: false``, fall back to the much
+    smaller Bragg vector map so Stage 2B does not silently degrade to mock
+    peak-count scoring.
+    """
+    roi_name = roi.get("name", "unknown")
+    roi_data_path = roi.get("roi_data_path")
+    if roi_data_path:
+        try:
+            return _mean_diffraction_pattern(np.load(roi_data_path))
+        except (OSError, ValueError) as exc:
+            log.warning("Could not load ROI data for %s: %s", roi_name, exc)
+
+    bragg_vector_map_path = roi.get("bragg_vector_map_path")
+    if bragg_vector_map_path:
+        try:
+            arr = np.asarray(np.load(bragg_vector_map_path), dtype=np.float32)
+        except OSError as exc:
+            log.warning("Could not load Bragg vector map for %s: %s", roi_name, exc)
+            return None
+        if arr.ndim == 2:
+            return arr
+        log.warning("Bragg vector map for %s must be 2D, got shape %s", roi_name, arr.shape)
+    return None
+
+
+def _candidate_display_name(candidate: IndexingCandidate) -> str:
+    """Human-facing phase label, falling back to the candidate key."""
+    return str(candidate.phase or candidate.name)
+
+
+def _second_best_candidate_hit(
+    hits: list[dict[str, Any]],
+    best: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Best hit from a competing candidate, not another orientation of the winner."""
+    best_name = best["candidate"].name
+    best_phase = _candidate_display_name(best["candidate"])
+    for hit in hits:
+        candidate = hit["candidate"]
+        if candidate.name != best_name and _candidate_display_name(candidate) != best_phase:
+            return hit
+    return None
 
 
 def _save_match_visuals(
@@ -456,7 +678,7 @@ def _save_match_visuals(
         best_template = best["stack"][best["template_idx"]]
         save_png(roi_dir / "template_best_match.png", best_template)
 
-        # Overlay: mean DP (gray) + template (green)
+        # Overlay: mean DP (gray) + explicit green template peaks.
         base = np.asarray(mean_dp, dtype=np.float32)
         finite = base[np.isfinite(base)]
         if finite.size > 0:
@@ -470,10 +692,12 @@ def _save_match_visuals(
         else:
             gray = np.zeros(base.shape, dtype=np.uint8)
         overlay = np.stack([gray, gray, gray], axis=-1).copy()
-        # Green channel = 50% template intensity
         tmpl_norm = _scale_unit_interval(best_template)
-        green = (tmpl_norm * 200).astype(np.uint8)
-        overlay[:, :, 1] = np.maximum(overlay[:, :, 1], green)
+        peak_mask = tmpl_norm >= 0.20
+        green = (tmpl_norm * 255).astype(np.uint8)
+        overlay[:, :, 0] = np.where(peak_mask, (overlay[:, :, 0] * 0.25).astype(np.uint8), overlay[:, :, 0])
+        overlay[:, :, 1] = np.where(peak_mask, np.maximum(overlay[:, :, 1], green), overlay[:, :, 1])
+        overlay[:, :, 2] = np.where(peak_mask, (overlay[:, :, 2] * 0.25).astype(np.uint8), overlay[:, :, 2])
         save_png(roi_dir / "template_match_overlay.png", overlay)
 
         # Correlation vs angle bar chart
@@ -597,10 +821,19 @@ def _stage2_geometry(stage2a_summary: dict[str, Any], *, required: bool = True) 
         raise ValueError("Stage 2A summary does not provide sig_shape for template generation.")
     if beam_center is None:
         beam_center = [float(sig_shape[0] - 1) / 2.0, float(sig_shape[1] - 1) / 2.0]
+
+    # Record the data (post-binning) sig_shape when it differs, so the
+    # template matcher can downsample templates to match the actual data.
+    bin_q = int(stage2a_summary.get("parameters", {}).get("bin_q", 1))
+    data_sig_shape = None
+    if bin_q > 1 and not any(r.get("sig_shape_after_bin") for r in roi_results):
+        data_sig_shape = [max(1, s // bin_q) for s in sig_shape]
+
     return {
         "sig_shape": sig_shape,
         "beam_center_yx": beam_center,
         "beam_center_source": "stage2a_roi" if any(r.get("beam_center_yx") for r in roi_results) else "detector_center_fallback",
+        "data_sig_shape": data_sig_shape,
     }
 
 
