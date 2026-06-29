@@ -92,18 +92,24 @@ def bin_and_export(
     log.info("Loaded: shape=%s", original_shape)
 
     # --- Bin -----------------------------------------------------------------
+    # Use py4DSTEM's native bin_R/bin_Q for MEMMAP safety — they process
+    # memory-mapped arrays in chunks and won't allocate a full float32 copy
+    # of the raw data.  Convert to uint16 after binning to keep file sizes
+    # manageable.
     if r_bin > 1:
-        log.info("Applying mean r_bin=%d -> uint16", r_bin)
-        cube = _bin_R_mean_uint16(cube, r_bin)
+        log.info("Applying r_bin=%d (py4DSTEM native, mmap-safe)", r_bin)
+        cube.bin_R(r_bin)
+        cube.data = _to_uint16_intensity(cube.data)
         new_shape = tuple(int(v) for v in cube.data.shape)
-        log.info("  after mean r_bin(%d): %s -> %s", r_bin, original_shape, new_shape)
+        log.info("  after r_bin(%d): %s -> %s", r_bin, original_shape, new_shape)
         original_shape = new_shape
 
     if q_bin > 1:
-        log.info("Applying mean q_bin=%d -> uint16", q_bin)
-        cube = _bin_Q_mean_uint16(cube, q_bin)
+        log.info("Applying q_bin=%d (py4DSTEM native, mmap-safe)", q_bin)
+        cube.bin_Q(q_bin)
+        cube.data = _to_uint16_intensity(cube.data)
         new_shape = tuple(int(v) for v in cube.data.shape)
-        log.info("  after mean q_bin(%d): %s -> %s", q_bin, original_shape, new_shape)
+        log.info("  after q_bin(%d): %s -> %s", q_bin, original_shape, new_shape)
 
     # --- Save ----------------------------------------------------------------
     try:
