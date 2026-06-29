@@ -22,6 +22,7 @@ from .masks import build_annular_masks
 from .orientation import OrientationResult, run_orientation_preview
 from .phase import PhaseScreeningResult, screen_phases
 from .preprocess import PreprocessedArray, PreprocessSpec, apply_preprocess
+from .preprocess_raw import bin_and_export, crop_navigation_and_export
 from .roi_bragg import ROIBraggResult, Stage2Result, load_roi_candidates, run_roi_bragg_for_rois
 from .stage2 import load_stage1_manifest, run_stage2
 from .synthetic import make_synthetic_4dstem
@@ -52,8 +53,10 @@ __all__ = [
     "apply_gamma",
     "apply_ipf_colors",
     "apply_preprocess",
+    "bin_and_export",
     "build_annular_masks",
     "compute_radial_fingerprints",
+    "crop_navigation_and_export",
     "compute_virtual_images",
     "configure_pipeline_logging",
     "get_logger",

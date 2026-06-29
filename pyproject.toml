@@ -19,6 +19,8 @@ fourdstem-run = "fourdstem_pipeline.cli:run"
 fourdstem-dry-run = "fourdstem_pipeline.cli:dry_run"
 fourdstem-stage2 = "fourdstem_pipeline.cli:stage2"
 fourdstem-stage2b = "fourdstem_pipeline.cli:stage2b"
+fourdstem-bin-export = "fourdstem_pipeline.cli:bin_export"
+fourdstem-crop-export = "fourdstem_pipeline.cli:crop_export"
 
 [project.optional-dependencies]
 large-data = [

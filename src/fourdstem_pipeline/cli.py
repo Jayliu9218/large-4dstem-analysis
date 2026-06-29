@@ -166,6 +166,98 @@ def stage2b() -> None:
     print(f"  Output: {summary.get('output_dir', '?')}\n")
 
 
+def bin_export() -> None:
+    """``fourdstem-bin-export`` — bin raw data and export to EMD/H5."""
+    parser = argparse.ArgumentParser(
+        description="Load 4D-STEM data, bin navigation/detector, export to EMD/H5",
+    )
+    parser.add_argument(
+        "--input", required=True,
+        help="Path to raw data file (.mib, .h5, .hdf5, .emd)",
+    )
+    parser.add_argument(
+        "--output", required=True,
+        help="Output path (.h5 appended if no recognised suffix)",
+    )
+    parser.add_argument(
+        "--r-bin", type=int, default=1,
+        help="Navigation (real-space) binning factor  [default: 1]",
+    )
+    parser.add_argument(
+        "--q-bin", type=int, default=1,
+        help="Detector (reciprocal-space) binning factor  [default: 1]",
+    )
+    parser.add_argument(
+        "--mem", default="MEMMAP",
+        help="py4DSTEM memory mode  [default: MEMMAP]",
+    )
+    parser.add_argument(
+        "--scan-shape", type=int, nargs=2, default=None,
+        help="Raw navigation shape (ny nx) for MIB import",
+    )
+    args = parser.parse_args()
+
+    from .preprocess_raw import bin_and_export
+
+    try:
+        out = bin_and_export(
+            args.input,
+            args.output,
+            r_bin=args.r_bin,
+            q_bin=args.q_bin,
+            mem=args.mem,
+            scan_shape=tuple(args.scan_shape) if args.scan_shape else None,
+        )
+        print(f"\nBinned DataCube exported: {out}\n")
+    except Exception as exc:
+        print(f"\nBin-export failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def crop_export() -> None:
+    """``fourdstem-crop-export`` — crop navigation and export to EMD/H5."""
+    parser = argparse.ArgumentParser(
+        description="Load 4D-STEM data, crop navigation dimensions, export to EMD/H5",
+    )
+    parser.add_argument(
+        "--input", required=True,
+        help="Path to raw data file (.mib, .h5, .hdf5, .emd)",
+    )
+    parser.add_argument(
+        "--output", required=True,
+        help="Output path (.h5 appended if no recognised suffix)",
+    )
+    parser.add_argument(
+        "--nav-crop", type=int, nargs=4, required=True,
+        metavar=("Y0", "Y1", "X0", "X1"),
+        help="Crop region in nav pixels: y0 y1 x0 x1 (y1/x1 exclusive)",
+    )
+    parser.add_argument(
+        "--mem", default="MEMMAP",
+        help="py4DSTEM memory mode  [default: MEMMAP]",
+    )
+    parser.add_argument(
+        "--scan-shape", type=int, nargs=2, default=None,
+        help="Raw navigation shape (ny nx) for MIB import",
+    )
+    args = parser.parse_args()
+
+    from .preprocess_raw import crop_navigation_and_export
+
+    try:
+        out = crop_navigation_and_export(
+            args.input,
+            args.output,
+            nav_crop=tuple(args.nav_crop),
+            mem=args.mem,
+            scan_shape=tuple(args.scan_shape) if args.scan_shape else None,
+        )
+        print(f"\nCropped DataCube exported: {out}\n")
+    except Exception as exc:
+        print(f"\nCrop-export failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -679,6 +771,8 @@ _SUBCOMMANDS: dict[str, str] = {
     "dry_run": "Validate configuration without loading data",
     "stage2": "Execute Stage 2A ROI Bragg detection",
     "stage2b": "Create the Stage 2B indexing summary contract",
+    "bin-export": "Bin raw data (R_bin, Q_bin) and export to EMD/H5",
+    "crop-export": "Crop navigation dimensions and export to EMD/H5",
 }
 
 
@@ -701,6 +795,10 @@ def _main() -> None:
         stage2()
     elif subcommand == "stage2b":
         stage2b()
+    elif subcommand == "bin-export":
+        bin_export()
+    elif subcommand == "crop-export":
+        crop_export()
 
 
 if __name__ == "__main__":
