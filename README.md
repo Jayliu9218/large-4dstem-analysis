@@ -19,16 +19,17 @@ crystallographic phase validation with ambiguity detection**.
   calibration cascade, central-exclusion peak filtering, cluster/background
   validation, Bragg QC metrics, tabular peak output (Parquet), and a report
   labelling which ROIs are ready for indexing.
-- **Stage 2B (v3)** — CIF→kinematic template generation with space-group
+- **Stage 2B (v4)** — CIF→kinematic template generation with space-group
   extinction filtering, multi-zone-axis orientation sweep, physical reciprocal
   calibration, **peak-position residual analysis**, **hybrid validation
   scoring** (correlation + matched-observable fraction + q-residual),
   **ambiguity detection** (reports `AMBIGUOUS` when evidence is degenerate),
   negative-control CIF validation, 4-tier confidence reporting
   (`HIGH_CONFIDENCE` / `MEDIUM_CONFIDENCE` / `LOW_CONFIDENCE` / `UNINDEXED`),
-  score-sign QC check, experimental-template peak overlays, radial q-profile
-  validation, parameter stability sweep, EBSD-style phase match map, and an
-  interactive PNG gallery.
+  score-sign QC check, ROI-level top-k phase/orientation evidence,
+  experimental-template peak overlays, radial q-profile validation,
+  parameter stability sweep, cluster-level phase match map, and an interactive
+  PNG gallery.
 
 **Real-data verification** (Ti, 512×512×256×256 detector, 34 GB MIB, `bin_q=2`):
 
@@ -36,9 +37,9 @@ crystallographic phase validation with ambiguity detection**.
 |-------|--------|--------|
 | 1 | Fingerprint classes | 4 clusters on 256×256 nav (`r_bin=2`) |
 | 2A | Bragg detection | 75,080 total peaks across 11 ROIs (`minRelativeIntensity=0.10`, central exclusion), QC PASS |
-| 2B (v3) | Phase validation | **11/11 ROIs `AMBIGUOUS / LOW_CONFIDENCE`** — Ti-hcp vs TiO₂-rutile near-degenerate at `bin_q=2`; pipeline correctly refuses to force a phase label |
+| 2B (v4) | Phase validation | ROI-level top-k phase/orientation evidence with radial q gating; ambiguous/low-confidence calls are retained instead of forced labels |
 
-> **Current status (v3):** `Stage 2B-v3` is an ambiguity-aware, evidence-based
+> **Current status (v4):** `Stage 2B-v4` is an ambiguity-aware, evidence-based
 > candidate phase reporter — not a confirmed phase mapper.  The limiting factor
 > is diffraction evidence at `bin_q=2` (128×128 effective detector), not the
 > algorithm.  See the [Real-Data Results](#real-data-results-ti-34-gb-mib)
@@ -196,7 +197,7 @@ python -m fourdstem_pipeline.cli stage2 --config configs/stage2_roi_bragg.yaml
 
 ```bash
 python -m fourdstem_pipeline.cli stage2b --config configs/stage2_indexing.yaml
-# Parameter stability sweep (v3):
+# Parameter stability sweep:
 python scripts/run_stage2b_sweep.py --config configs/stage2_indexing.yaml
 ```
 
@@ -220,6 +221,9 @@ python scripts/run_stage2b_sweep.py --config configs/stage2_indexing.yaml
 6. **Hybrid validation scoring** — combines correlation (35%) +
    matched-observable template fraction (40%) + q-residual (15%) +
    unexplained experimental fraction (10%)
+7. **v4 phase/orientation evidence** keeps top-k template matches per phase,
+   computes radial q support before interpreting 2D orientation matches, and
+   reports separate phase, orientation, and mapping confidence fields.
 7. **Ambiguity detection** — reports `AMBIGUOUS` when hybrid scores of
    competing candidates are within 0.08 and matched fractions are < 20%,
    or when the correlation winner differs from the peak-matching winner
@@ -244,11 +248,11 @@ python scripts/run_stage2b_sweep.py --config configs/stage2_indexing.yaml
 14. Updates `stage2_gallery.html` with a Global Overview section and the
     per-ROI diagnostic overlays
 
-**Key outputs (v3 schema):**
+**Key outputs (v4 schema):**
 
 | File | Content |
 |------|---------|
-| `stage2_indexing_summary.json` | Phase call, candidate group, hybrid score, peak residuals, confidence tier, score-sign QC (schema v3) |
+| `stage2_indexing_summary.json` | Phase call, top-k evidence, radial support, phase/orientation/mapping confidence, score-sign QC (schema v4) |
 | `phase_match_map.png` | EBSD-style phase overview — ambiguous ROIs shown as candidate-group labels |
 | `sweep_summary.json` | (from sweep script) Stability matrix across parameter grid |
 | `templates/<candidate>_template_stack.npy` | Full orientation template stack (float32), per-zone hkls/qxy persisted |
@@ -257,6 +261,7 @@ python scripts/run_stage2b_sweep.py --config configs/stage2_indexing.yaml
 | `roi_<name>/template_match_overlay.png` | Mean DP + template peaks (green) |
 | `roi_<name>/experimental_template_peak_overlay.png` | Mean DP diagnostic: green=matched experimental peaks, red=unexplained experimental peaks, blue=unmatched template peaks |
 | `roi_<name>/radial_q_profile_validation.png` | 1D radial q-profile validation against expected template q-bands before 2D orientation matching |
+| `roi_<name>/phase_orientation_topk.json` | Ranked top-k template matches grouped by phase, with radial support and phase/orientation margins |
 | `roi_<name>/correlation_vs_angle.png` | Correlation vs. in-plane angle |
 
 **Key parameters:** `max_index`, `zone_axes`, `orientation_step_deg`,
@@ -386,6 +391,13 @@ template_generation:
   # Physical calibration (200 kV, L=91 mm, pixel ~6.5 um):
   reciprocal_pixels_per_inv_angstrom: 55.9
   intensity_power: 2.0
+
+matching:
+  top_k_per_phase: 5
+  radial_gate_enabled: true
+  radial_min_support: 0.25
+  phase_margin_threshold: 0.08
+  orientation_margin_threshold: 0.05
 
 candidate_cifs:
   - name: Ti_hcp

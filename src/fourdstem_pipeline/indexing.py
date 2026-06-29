@@ -79,6 +79,17 @@ class ROIIndexingResult:
     hybrid_score: float | None = None
     phase_call: str = "not_scored"
     candidate_group: str | None = None
+    # Phase/orientation evidence (v4)
+    top_phase_matches: list[dict[str, Any]] | None = None
+    best_phase: str | None = None
+    best_orientation: dict[str, Any] | None = None
+    phase_margin: float | None = None
+    orientation_margin: float | None = None
+    radial_support_score: float | None = None
+    radial_gate_status: str | None = None
+    orientation_confidence: str = "not_scored"
+    mapping_confidence: str = "not_scored"
+    ambiguity_reason: str | None = None
 
 
 def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
@@ -102,6 +113,7 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
     stage2a_summary = json.loads(stage2a_summary_path.read_text(encoding="utf-8"))
 
     template_cfg = _template_config(cfg.get("template_generation") or {})
+    matching_cfg = _matching_config(cfg.get("matching") or {})
     candidates = _load_candidates(cfg.get("candidate_cifs") or [], base_dir)
     accepted_rois = [
         roi for roi in stage2a_summary.get("roi_results", [])
@@ -116,13 +128,13 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
     )
 
     roi_results = [
-        _match_roi_against_candidates(roi, candidates)
+        _match_roi_against_candidates(roi, candidates, matching_cfg)
         for roi in accepted_rois
     ]
 
     any_template = any(c.template_count > 0 for c in candidates)
     summary = {
-        "schema_version": "stage2b-indexing-v3",
+        "schema_version": "stage2b-indexing-v4",
         "stage": "2B",
         "status": _stage2b_status(accepted_rois, candidates),
         "stage2a": {
@@ -137,6 +149,7 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
             "backend": "analytic_cif",
             "templates_generated": int(sum(c.template_count for c in candidates)),
         },
+        "matching": matching_cfg,
         "candidate_cifs": [
             {
                 "name": c.name,
@@ -181,11 +194,25 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
                 "hybrid_score": r.hybrid_score,
                 "phase_call": r.phase_call,
                 "candidate_group": r.candidate_group,
+                "top_phase_matches": r.top_phase_matches,
+                "best_phase": r.best_phase,
+                "best_orientation": r.best_orientation,
+                "phase_margin": r.phase_margin,
+                "orientation_margin": r.orientation_margin,
+                "radial_support_score": r.radial_support_score,
+                "radial_gate_status": r.radial_gate_status,
+                "orientation_confidence": r.orientation_confidence,
+                "mapping_confidence": r.mapping_confidence,
+                "ambiguity_reason": r.ambiguity_reason,
             }
             for r in roi_results
         ],
         "notes": [
             "Stage 2B uses analytic kinematic CIF templates when lattice parameters are available.",
+            "Schema v4 (stage2b-indexing-v4): Added ROI-level top-k phase/orientation evidence, "
+            "radial q-profile support scoring, separate phase/orientation/mapping confidence fields, "
+            "and per-ROI phase_orientation_topk.json diagnostics. Phase maps remain cluster-level "
+            "screening visualizations, not dense pointwise EBSD maps.",
             "Scores are normalized template correlations on ROI mean diffraction patterns.",
             "Full structure-factor intensities and py4DSTEM/pyxem backend adapters are future extensions.",
             "Schema v3 (stage2b-indexing-v3): Added peak-position residual metrics "
@@ -469,8 +496,8 @@ def _write_stage2b_phase_mapping_report(
         "",
         "## Per-ROI Matching Evidence",
         "",
-        "| ROI | Cluster | Phase call | Confidence | Corr. score | Margin | Hybrid | Observable template matched | q residual | Runner-up | Phase call mode |",
-        "| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+        "| ROI | Cluster | Phase call | Phase conf. | Orient. conf. | Mapping conf. | Evidence margin | Orient. margin | Radial support | Radial gate | Corr. score | Hybrid | Observable template matched | q residual | Ambiguity reason |",
+        "| --- | ---: | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
     ])
     cluster_by_name = {
         str(r.get("name")): r.get("cluster_id")
@@ -483,13 +510,17 @@ def _write_stage2b_phase_mapping_report(
             f"{_fmt_report_value(cluster_by_name.get(str(r.get('name'))))} | "
             f"`{_fmt_report_value(r.get('candidate_phase'))}` | "
             f"`{_fmt_report_value(r.get('phase_confidence'))}` | "
+            f"`{_fmt_report_value(r.get('orientation_confidence'))}` | "
+            f"`{_fmt_report_value(r.get('mapping_confidence'))}` | "
+            f"{_fmt_report_float(r.get('phase_margin'))} | "
+            f"{_fmt_report_float(r.get('orientation_margin'))} | "
+            f"{_fmt_report_float(r.get('radial_support_score'))} | "
+            f"`{_fmt_report_value(r.get('radial_gate_status'))}` | "
             f"{_fmt_report_float(r.get('match_score'))} | "
-            f"{_fmt_report_float(r.get('score_margin'))} | "
             f"{_fmt_report_float(r.get('hybrid_score'))} | "
             f"{_fmt_report_float(r.get('matched_observable_template_fraction'))} | "
             f"{_fmt_report_float(r.get('mean_q_residual'))} | "
-            f"`{_fmt_report_value(r.get('second_best_candidate'))}` | "
-            f"`{_fmt_report_value(r.get('phase_call'))}` |"
+            f"`{_fmt_report_value(r.get('ambiguity_reason'))}` |"
         )
 
     lines.extend([
@@ -570,6 +601,25 @@ def _phase_mapping_low_confidence_reasons(roi_results: list[dict[str, Any]]) -> 
     ambiguous = sum(1 for r in roi_results if r.get("phase_call") == "AMBIGUOUS")
     if ambiguous:
         reasons.append(f"{ambiguous}/{len(roi_results)} ROI matches are `AMBIGUOUS`, meaning multiple candidate phases or candidate groups remain effectively tied.")
+    phase_margins = [float(r["phase_margin"]) for r in roi_results if r.get("phase_margin") is not None]
+    if phase_margins:
+        reasons.append(
+            f"Phase evidence margins are small: max {max(phase_margins):.4f}, median {float(np.median(phase_margins)):.4f}. "
+            "Small margins mean the best phase is not clearly separated from the runner-up after radial and peak evidence."
+        )
+    orientation_margins = [float(r["orientation_margin"]) for r in roi_results if r.get("orientation_margin") is not None]
+    if orientation_margins:
+        reasons.append(
+            f"Orientation margins are small: max {max(orientation_margins):.4f}, median {float(np.median(orientation_margins)):.4f}. "
+            "This indicates 2D orientation matching is not uniquely resolved within the winning phase."
+        )
+    radial_scores = [float(r["radial_support_score"]) for r in roi_results if r.get("radial_support_score") is not None]
+    if radial_scores:
+        low_radial = sum(1 for v in radial_scores if v < 0.25)
+        reasons.append(
+            f"Radial q-profile support: min {min(radial_scores):.3f}, median {float(np.median(radial_scores)):.3f}; "
+            f"{low_radial}/{len(radial_scores)} ROI(s) are below the default 0.25 support gate."
+        )
     margins = [float(r["score_margin"]) for r in roi_results if r.get("score_margin") is not None]
     if margins:
         reasons.append(
@@ -793,10 +843,11 @@ def _generate_candidate_templates(
 def _match_roi_against_candidates(
     roi: dict[str, Any],
     candidates: list[IndexingCandidate],
+    matching_cfg: dict[str, Any] | None = None,
 ) -> ROIIndexingResult:
     n_bragg_peaks = int(roi.get("n_bragg_peaks", 0) or 0)
 
-    template_result = _template_match_roi(roi, candidates, n_bragg_peaks)
+    template_result = _template_match_roi(roi, candidates, n_bragg_peaks, matching_cfg or _matching_config({}))
     if template_result is not None:
         return template_result
 
@@ -807,6 +858,7 @@ def _template_match_roi(
     roi: dict[str, Any],
     candidates: list[IndexingCandidate],
     n_bragg_peaks: int,
+    matching_cfg: dict[str, Any],
 ) -> ROIIndexingResult | None:
     mean_dp = _load_roi_match_pattern(roi)
     if mean_dp is None:
@@ -968,6 +1020,12 @@ def _template_match_roi(
     # Sort by hybrid score descending
     hybrid_candidates.sort(key=lambda c: c["hybrid_score"], reverse=True)
 
+    # --- v4 phase/orientation evidence: top-k per phase + radial support -----
+    phase_evidence = _build_phase_orientation_evidence(roi, mean_dp, all_hits, matching_cfg)
+    if phase_evidence:
+        hybrid_candidates = phase_evidence
+        _write_phase_orientation_topk(roi, phase_evidence, matching_cfg)
+
     # --- Resolve phase call --------------------------------------------------
     resolution = _resolve_phase_call(best, hybrid_candidates)
     phase_call = resolution["phase_call"]
@@ -994,15 +1052,39 @@ def _template_match_roi(
     # Use hybrid-winner's residuals for reporting
     best_residual = hybrid_best or {}
     obs_frac = best_residual.get("matched_observable_template_fraction")
+    phase_margin = _phase_evidence_margin(phase_evidence)
+    radial_support_score = best_residual.get("radial_support_score")
+    orientation_margin = best_residual.get("orientation_margin")
 
-    phase_conf = _phase_confidence(
-        match_score, score_margin,
-        matched_template_fraction=obs_frac if obs_frac is not None else best_residual.get("matched_template_fraction"),
-        mean_q_residual=best_residual.get("mean_q_residual"),
+    phase_conf = _phase_evidence_confidence(
+        best_residual.get("evidence_score"),
+        phase_margin,
+        radial_support_score,
+        matching_cfg,
     )
+    if phase_conf == "UNINDEXED":
+        phase_conf = _phase_confidence(
+            match_score, score_margin,
+            matched_template_fraction=obs_frac if obs_frac is not None else best_residual.get("matched_template_fraction"),
+            mean_q_residual=best_residual.get("mean_q_residual"),
+        )
+    orient_conf = _orientation_confidence(orientation_margin, matching_cfg)
+    mapping_conf = _combined_mapping_confidence(phase_conf, orient_conf)
+
     # Downgrade to LOW_CONFIDENCE when phase is AMBIGUOUS
     if phase_call == "AMBIGUOUS" and phase_conf in ("HIGH_CONFIDENCE", "MEDIUM_CONFIDENCE"):
         phase_conf = "LOW_CONFIDENCE"
+        mapping_conf = _combined_mapping_confidence(phase_conf, orient_conf)
+
+    best_orientation = None
+    if best_residual:
+        best_orientation = {
+            "zone_axis": best_residual.get("zone_axis"),
+            "orientation_deg": best_residual.get("orientation_deg"),
+            "template_idx": best_residual.get("template_idx"),
+            "orientation_margin": orientation_margin,
+            "orientation_confidence": orient_conf,
+        }
 
     return ROIIndexingResult(
         name=str(roi.get("name", "unknown")),
@@ -1030,6 +1112,16 @@ def _template_match_roi(
         hybrid_score=best_residual.get("hybrid_score"),
         phase_call=phase_call,
         candidate_group=candidate_group,
+        top_phase_matches=[_jsonable_phase_evidence(row) for row in phase_evidence],
+        best_phase=best_residual.get("phase"),
+        best_orientation=best_orientation,
+        phase_margin=phase_margin,
+        orientation_margin=orientation_margin,
+        radial_support_score=radial_support_score,
+        radial_gate_status=best_residual.get("radial_gate_status"),
+        orientation_confidence=orient_conf,
+        mapping_confidence=mapping_conf,
+        ambiguity_reason=resolution_reason,
     )
 
 
@@ -1205,6 +1297,20 @@ def _template_config(raw: dict[str, Any]) -> dict[str, Any]:
             else float(raw["reciprocal_pixels_per_inv_angstrom"])
         ),
         "intensity_power": float(raw.get("intensity_power", 2.0)),
+    }
+
+
+def _matching_config(raw: dict[str, Any]) -> dict[str, Any]:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("matching must be a mapping.")
+    return {
+        "top_k_per_phase": max(1, int(raw.get("top_k_per_phase", 5))),
+        "radial_gate_enabled": bool(raw.get("radial_gate_enabled", True)),
+        "radial_min_support": float(raw.get("radial_min_support", 0.25)),
+        "phase_margin_threshold": float(raw.get("phase_margin_threshold", 0.08)),
+        "orientation_margin_threshold": float(raw.get("orientation_margin_threshold", 0.05)),
     }
 
 
@@ -1667,6 +1773,252 @@ def _save_radial_q_profile_validation(
             canvas[y0:y1 + 1, max(x - 1, x0):min(x + 2, x1 + 1)] = (255, 60, 60)
 
     save_png(path, canvas)
+
+
+def _compute_radial_support_evidence(
+    mean_dp: np.ndarray,
+    template_metadata: dict[str, Any],
+    template_idx: int,
+) -> dict[str, Any]:
+    src_shape = tuple(int(v) for v in template_metadata.get("sig_shape", mean_dp.shape))
+    dst_shape = tuple(int(v) for v in mean_dp.shape)
+    beam = template_metadata.get("beam_center_yx")
+    if beam is not None:
+        center = (
+            float(beam[0]) * dst_shape[0] / max(float(src_shape[0]), 1.0),
+            float(beam[1]) * dst_shape[1] / max(float(src_shape[1]), 1.0),
+        )
+    else:
+        center = None
+
+    radii, profile = _radial_profile(mean_dp, center)
+    if radii.size == 0:
+        return {"radial_support_score": None, "expected_q_bands": [], "matched_q_bands": [], "experimental_q_peaks": []}
+    finite = profile[np.isfinite(profile)]
+    if finite.size == 0:
+        return {"radial_support_score": None, "expected_q_bands": [], "matched_q_bands": [], "experimental_q_peaks": []}
+    norm = profile - float(np.min(finite))
+    denom = float(np.max(norm)) if float(np.max(norm)) > 0 else 1.0
+    norm = np.clip(norm / denom, 0, 1)
+
+    radius_scale = min(
+        float(dst_shape[0]) / max(float(src_shape[0]), 1.0),
+        float(dst_shape[1]) / max(float(src_shape[1]), 1.0),
+    )
+    experimental = radii[_radial_local_maxima(norm)]
+    expected = _expected_template_radii_px(
+        template_metadata,
+        template_idx,
+        float(radii[-1]) / max(radius_scale, 1e-12),
+    )
+    expected = expected * radius_scale
+    expected = expected[(expected > 1.0) & (expected < float(radii[-1]))]
+    expected = _cluster_radii(expected, min_separation_px=3.0)
+    if expected.size == 0:
+        return {
+            "radial_support_score": None,
+            "expected_q_bands": [],
+            "matched_q_bands": [],
+            "experimental_q_peaks": [round(float(v), 2) for v in experimental[:20]],
+        }
+
+    tol = max(2.0, float(template_metadata.get("peak_sigma_px", 5.0)) * radius_scale)
+    matched: list[float] = []
+    for er in expected:
+        if experimental.size and float(np.min(np.abs(experimental - er))) <= tol:
+            matched.append(float(er))
+    score = len(matched) / max(len(expected), 1)
+    return {
+        "radial_support_score": round(float(score), 4),
+        "expected_q_bands": [round(float(v), 2) for v in expected[:30]],
+        "matched_q_bands": [round(float(v), 2) for v in matched[:30]],
+        "experimental_q_peaks": [round(float(v), 2) for v in experimental[:30]],
+        "radial_tolerance_px": round(float(tol), 2),
+    }
+
+
+def _build_phase_orientation_evidence(
+    roi: dict[str, Any],
+    mean_dp: np.ndarray,
+    all_hits: list[dict[str, Any]],
+    matching_cfg: dict[str, Any],
+) -> list[dict[str, Any]]:
+    top_k = int(matching_cfg["top_k_per_phase"])
+    radial_gate_enabled = bool(matching_cfg["radial_gate_enabled"])
+    radial_min_support = float(matching_cfg["radial_min_support"])
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for hit in all_hits:
+        phase = _candidate_display_name(hit["candidate"])
+        grouped.setdefault(phase, []).append(hit)
+
+    evidence: list[dict[str, Any]] = []
+    for phase, hits in grouped.items():
+        hits.sort(key=lambda h: float(h["score"]), reverse=True)
+        best_hit = hits[0]
+        top_hits = hits[:top_k]
+        metadata = best_hit.get("metadata") or {}
+        candidate = best_hit["candidate"]
+
+        res: dict[str, Any] = {}
+        try:
+            res = _compute_peak_residual_metrics(roi, metadata, int(best_hit["template_idx"]))
+        except Exception as exc:
+            log.warning("Peak residual skipped for %s: %s", candidate.name, exc)
+
+        observable_frac: float | None = None
+        matched_obs: float | None = None
+        try:
+            tmpl_peaks = _reconstruct_template_peak_positions(metadata, int(best_hit["template_idx"]))
+            if tmpl_peaks is not None and len(tmpl_peaks) > 0:
+                observable_frac = _compute_observable_template_fraction(tmpl_peaks, tuple(metadata["sig_shape"]))
+                raw_matched_frac = res.get("matched_template_fraction") or 0.0
+                matched_obs = round(raw_matched_frac / observable_frac, 4) if observable_frac > 0 else 0.0
+        except Exception:
+            observable_frac = None
+            matched_obs = None
+
+        radial = _compute_radial_support_evidence(mean_dp, metadata, int(best_hit["template_idx"]))
+        radial_score = radial.get("radial_support_score")
+        if radial_score is None:
+            gate_status = "NOT_EVALUATED"
+        elif float(radial_score) >= radial_min_support:
+            gate_status = "PASS"
+        else:
+            gate_status = "LOW_SUPPORT"
+
+        hybrid = _compute_hybrid_validation_score(
+            correlation_score=float(best_hit["score"]),
+            matched_observable_fraction=matched_obs,
+            mean_q_residual=res.get("mean_q_residual"),
+            unexplained_experiment_fraction=res.get("unexplained_experiment_fraction"),
+        )
+        evidence_score = hybrid
+        if radial_gate_enabled and radial_score is not None:
+            evidence_score = round(0.8 * hybrid + 0.2 * float(radial_score), 4)
+            if gate_status == "LOW_SUPPORT":
+                evidence_score = round(evidence_score * 0.75, 4)
+
+        orientation_margin = None
+        if len(hits) > 1:
+            orientation_margin = round(float(hits[0]["score"]) - float(hits[1]["score"]), 4)
+
+        evidence.append({
+            "phase": phase,
+            "candidate": candidate.name,
+            "correlation_score": round(float(best_hit["score"]), 4),
+            "hybrid_score": hybrid,
+            "evidence_score": evidence_score,
+            "radial_support_score": radial_score,
+            "radial_gate_status": gate_status,
+            "radial_evidence": radial,
+            "matched_peak_count": res.get("matched_peak_count"),
+            "mean_q_residual": res.get("mean_q_residual"),
+            "mean_angle_residual": res.get("mean_angle_residual"),
+            "matched_template_fraction": res.get("matched_template_fraction"),
+            "unexplained_experiment_fraction": res.get("unexplained_experiment_fraction"),
+            "matched_observable_template_fraction": matched_obs,
+            "matched_observable_fraction": matched_obs,
+            "observable_template_fraction": observable_frac,
+            "zone_axis": best_hit["zone_axis"],
+            "orientation_deg": best_hit["orientation_deg"],
+            "template_idx": best_hit["template_idx"],
+            "stack": best_hit["stack"],
+            "all_scores": best_hit["all_scores"],
+            "orientations_deg": best_hit["orientations_deg"],
+            "candidate_obj": candidate,
+            "orientation_margin": orientation_margin,
+            "top_matches": [
+                {
+                    "rank": rank + 1,
+                    "correlation_score": round(float(hit["score"]), 4),
+                    "zone_axis": hit["zone_axis"],
+                    "orientation_deg": hit["orientation_deg"],
+                    "template_idx": int(hit["template_idx"]),
+                }
+                for rank, hit in enumerate(top_hits)
+            ],
+        })
+
+    evidence.sort(key=lambda c: float(c.get("evidence_score", 0.0)), reverse=True)
+    return evidence
+
+
+def _write_phase_orientation_topk(
+    roi: dict[str, Any],
+    evidence: list[dict[str, Any]],
+    matching_cfg: dict[str, Any],
+) -> None:
+    bragg_summary_path = roi.get("bragg_summary_path")
+    if not bragg_summary_path:
+        return
+    try:
+        roi_dir = Path(bragg_summary_path).parent
+        payload = {
+            "schema_version": "stage2b-phase-orientation-topk-v1",
+            "roi": roi.get("name", "unknown"),
+            "matching": matching_cfg,
+            "phase_matches": [_jsonable_phase_evidence(row) for row in evidence],
+        }
+        (roi_dir / "phase_orientation_topk.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception as exc:
+        log.warning("Could not write phase/orientation top-k evidence for %s: %s", roi.get("name", "unknown"), exc)
+
+
+def _jsonable_phase_evidence(row: dict[str, Any]) -> dict[str, Any]:
+    omit = {"stack", "candidate_obj", "all_scores", "orientations_deg"}
+    result: dict[str, Any] = {}
+    for key, value in row.items():
+        if key in omit:
+            continue
+        if isinstance(value, np.generic):
+            result[key] = value.item()
+        else:
+            result[key] = value
+    return result
+
+
+def _phase_evidence_margin(evidence: list[dict[str, Any]]) -> float | None:
+    if len(evidence) < 2:
+        return None
+    return round(float(evidence[0].get("evidence_score", 0.0)) - float(evidence[1].get("evidence_score", 0.0)), 4)
+
+
+def _phase_evidence_confidence(
+    evidence_score: float | None,
+    phase_margin: float | None,
+    radial_support_score: float | None,
+    matching_cfg: dict[str, Any],
+) -> str:
+    if evidence_score is None or evidence_score <= 0.0:
+        return "UNINDEXED"
+    margin = phase_margin or 0.0
+    radial_ok = radial_support_score is None or radial_support_score >= float(matching_cfg["radial_min_support"])
+    if evidence_score > 0.55 and margin > max(float(matching_cfg["phase_margin_threshold"]), 0.10) and radial_ok:
+        return "HIGH_CONFIDENCE"
+    if evidence_score > 0.40 and margin >= float(matching_cfg["phase_margin_threshold"]) and radial_ok:
+        return "MEDIUM_CONFIDENCE"
+    return "LOW_CONFIDENCE"
+
+
+def _orientation_confidence(
+    orientation_margin: float | None,
+    matching_cfg: dict[str, Any],
+) -> str:
+    if orientation_margin is None:
+        return "LOW_CONFIDENCE"
+    threshold = float(matching_cfg["orientation_margin_threshold"])
+    if orientation_margin >= max(0.10, 2.0 * threshold):
+        return "HIGH_CONFIDENCE"
+    if orientation_margin >= threshold:
+        return "MEDIUM_CONFIDENCE"
+    return "LOW_CONFIDENCE"
+
+
+def _combined_mapping_confidence(phase_confidence: str, orientation_confidence: str) -> str:
+    order = {"UNINDEXED": 0, "LOW_CONFIDENCE": 1, "MEDIUM_CONFIDENCE": 2, "HIGH_CONFIDENCE": 3}
+    reverse = {v: k for k, v in order.items()}
+    return reverse[min(order.get(phase_confidence, 1), order.get(orientation_confidence, 1))]
 
 
 def _apply_extinctions(
@@ -2134,8 +2486,8 @@ def _resolve_phase_call(
 
     best = candidates[0]
     best_corr_score = float(best.get("correlation_score", 0))
-    best_hybrid = float(best.get("hybrid_score", 0))
-    best_mof = best.get("matched_observable_fraction")
+    best_hybrid = float(best.get("evidence_score", best.get("hybrid_score", 0)))
+    best_mof = best.get("matched_observable_fraction", best.get("matched_observable_template_fraction"))
 
     # UNINDEXED: correlation too low
     if best_corr_score <= 0.0:
@@ -2153,8 +2505,8 @@ def _resolve_phase_call(
         }
 
     second = candidates[1]
-    second_hybrid = float(second.get("hybrid_score", 0))
-    second_mof = second.get("matched_observable_fraction")
+    second_hybrid = float(second.get("evidence_score", second.get("hybrid_score", 0)))
+    second_mof = second.get("matched_observable_fraction", second.get("matched_observable_template_fraction"))
     hybrid_margin = best_hybrid - second_hybrid
 
     # AMBIGUOUS: hybrid scores too close
@@ -2181,7 +2533,7 @@ def _resolve_phase_call(
     # AMBIGUOUS: correlation winner ≠ hybrid (peak-matching) winner
     corr_winner = max(candidates, key=lambda c: float(c.get("correlation_score", 0)))
     if corr_winner.get("phase") != best.get("phase"):
-        corr_best_mof = corr_winner.get("matched_observable_fraction")
+        corr_best_mof = corr_winner.get("matched_observable_fraction", corr_winner.get("matched_observable_template_fraction"))
         if corr_best_mof and best_mof and best_mof > corr_best_mof:
             names = sorted({str(corr_winner.get("phase", "?")), str(best.get("phase", "?"))})
             return {

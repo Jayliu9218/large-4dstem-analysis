@@ -41,6 +41,15 @@ template_generation:
   reciprocal_pixels_per_inv_angstrom: 55.9
   intensity_power: 2.0
 
+# v4 phase/orientation evidence controls.  Radial q support is used as a
+# soft gate/downweight before interpreting 2D template matches.
+matching:
+  top_k_per_phase: 5
+  radial_gate_enabled: true
+  radial_min_support: 0.25
+  phase_margin_threshold: 0.08
+  orientation_margin_threshold: 0.05
+
 # Candidate CIFs. CIFs with lattice parameters generate analytic kinematic
 # templates; reference_peaks is retained only for mocked contract tests.
 #

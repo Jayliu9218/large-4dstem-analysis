@@ -991,7 +991,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(summary["candidate_cifs"][0]["scoring_mode"], "mock_peak_count")
         self.assertEqual(summary["output_dir"], str(output_dir))
         self.assertEqual(summary["roi_results"][0]["name"], "roi_good")
-        self.assertEqual(summary["schema_version"], "stage2b-indexing-v3")
+        self.assertEqual(summary["schema_version"], "stage2b-indexing-v4")
         self.assertEqual(summary["roi_results"][0]["candidate_phase"], "candidate")
         self.assertEqual(summary["roi_results"][0]["match_score"], 1.0)
         self.assertEqual(summary["roi_results"][0]["match_quality"], "mock_scored")
@@ -1083,7 +1083,7 @@ class WorkflowTests(unittest.TestCase):
         roi_result = summary["roi_results"][0]
         candidate = summary["candidate_cifs"][0]
         self.assertEqual(summary["status"], "TEMPLATE_MATCHED")
-        self.assertEqual(summary["schema_version"], "stage2b-indexing-v3")
+        self.assertEqual(summary["schema_version"], "stage2b-indexing-v4")
         self.assertEqual(candidate["scoring_mode"], "template_match")
         self.assertEqual(candidate["template_count"], 1)
         self.assertTrue(Path(candidate["template_stack_path"]).exists())
@@ -1098,6 +1098,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(roi_result["orientation_candidate_deg"], 0.0)
         self.assertEqual(roi_result["best_zone_axis"], [0.0, 0.0, 1.0])
         self.assertIn(roi_result["phase_confidence"], ("HIGH_CONFIDENCE", "MEDIUM_CONFIDENCE", "LOW_CONFIDENCE"))
+        self.assertEqual(roi_result["best_phase"], "cubic")
+        self.assertIsInstance(roi_result["best_orientation"], dict)
+        self.assertIn(roi_result["orientation_confidence"], ("HIGH_CONFIDENCE", "MEDIUM_CONFIDENCE", "LOW_CONFIDENCE"))
+        self.assertIn(roi_result["mapping_confidence"], ("HIGH_CONFIDENCE", "MEDIUM_CONFIDENCE", "LOW_CONFIDENCE"))
+        self.assertIsInstance(roi_result["top_phase_matches"], list)
+        self.assertEqual(roi_result["top_phase_matches"][0]["phase"], "cubic")
+        self.assertLessEqual(len(roi_result["top_phase_matches"][0]["top_matches"]), summary["matching"]["top_k_per_phase"])
+        self.assertIn("radial_support_score", roi_result)
         # Single candidate → no second-best
         self.assertIsNone(roi_result["second_best_candidate"])
         self.assertIsNone(roi_result["score_margin"])
@@ -1106,6 +1114,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("score:1.000", gallery_html)
         self.assertTrue((roi_dir / "experimental_template_peak_overlay.png").exists())
         self.assertTrue((roi_dir / "radial_q_profile_validation.png").exists())
+        self.assertTrue((roi_dir / "phase_orientation_topk.json").exists())
         self.assertTrue((output_dir / "stage2_phase_mapping_report.md").exists())
         self.assertTrue((output_dir / "stage2_phase_mapping_report.html").exists())
 
@@ -1145,7 +1154,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(summary["roi_results"][0]["phase_confidence"], "not_scored")
         self.assertIsNone(summary["roi_results"][0]["match_score"])
         self.assertIsNone(summary["roi_results"][0]["candidate_phase"])
-        self.assertEqual(summary["schema_version"], "stage2b-indexing-v3")
+        self.assertEqual(summary["schema_version"], "stage2b-indexing-v4")
 
     def test_stage2b_matches_from_bragg_vector_map_without_roi_data(self):
         """Stage 2B still template-matches when Stage 2A skipped roi_data.npy."""
@@ -1302,7 +1311,7 @@ class WorkflowTests(unittest.TestCase):
         summary_path = self.output_dir / "stage2b_cli" / "stage2_indexing_summary.json"
         self.assertTrue(summary_path.exists())
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        self.assertEqual(summary["schema_version"], "stage2b-indexing-v3")
+        self.assertEqual(summary["schema_version"], "stage2b-indexing-v4")
         pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('fourdstem-stage2b = "fourdstem_pipeline.cli:stage2b"', pyproject)
 
@@ -1554,6 +1563,150 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(roi_result["candidate_phase"], "phase_a")
         self.assertEqual(roi_result["second_best_candidate"], "phase_b")
         self.assertGreater(roi_result["score_margin"], 0.15)
+
+    def test_stage2b_v4_topk_phase_evidence_ranks_two_phase_match(self):
+        """v4 records phase-level top-k evidence with radial support for each candidate."""
+        from fourdstem_pipeline.indexing import (
+            _generate_kinematic_template_stack,
+            run_stage2_indexing,
+        )
+
+        stage2_dir = self.output_dir / "stage2a_v4_topk"
+        roi_dir = stage2_dir / "roi_good"
+        roi_dir.mkdir(parents=True)
+        cif_a = self.output_dir / "v4_a.cif"
+        cif_a.write_text(
+            "data_A\n_cell_length_a 2.0\n_cell_length_b 2.0\n_cell_length_c 2.0\n"
+            "_cell_angle_alpha 90\n_cell_angle_beta 90\n_cell_angle_gamma 90\n",
+            encoding="utf-8",
+        )
+        cif_b = self.output_dir / "v4_b.cif"
+        cif_b.write_text(
+            "data_B\n_cell_length_a 4.5\n_cell_length_b 4.5\n_cell_length_c 4.5\n"
+            "_cell_angle_alpha 90\n_cell_angle_beta 90\n_cell_angle_gamma 90\n",
+            encoding="utf-8",
+        )
+        stack_a, _ = _generate_kinematic_template_stack(
+            {"a": 2.0, "b": 2.0, "c": 2.0, "alpha": 90.0, "beta": 90.0, "gamma": 90.0},
+            sig_shape=(32, 32), beam_center_yx=(16.0, 16.0),
+            max_index=1, orientations_deg=[0.0, 45.0, 90.0],
+            zone_axis=(0.0, 0.0, 1.0),
+            peak_sigma_px=1.0, reciprocal_pixels_per_inv_angstrom=8.0,
+            intensity_power=2.0,
+        )
+        roi_data_path = roi_dir / "roi_data.npy"
+        np.save(roi_data_path, stack_a[0][None, None, :, :].astype(np.float32))
+        (stage2_dir / "stage2_summary.json").write_text(
+            json.dumps({
+                "run_name": "v4_topk_stage2a",
+                "manifest": {"sig_shape": [32, 32]},
+                "roi_results": [{
+                    "name": "roi_good", "error": None, "n_bragg_peaks": 8,
+                    "background_fraction": 0.0, "sample_mask_coverage": 1.0,
+                    "beam_center_source": "stage1_com",
+                    "beam_center_yx": [16.0, 16.0], "sig_shape": [32, 32],
+                    "roi_data_path": str(roi_data_path),
+                    "bragg_summary_path": str(roi_dir / "bragg_summary.json"),
+                }],
+            }),
+            encoding="utf-8",
+        )
+
+        summary = run_stage2_indexing({
+            "stage2_dir": str(stage2_dir),
+            "output_dir": str(self.output_dir / "stage2b_v4_topk"),
+            "template_generation": {
+                "max_index": 1,
+                "zone_axis": [0, 0, 1],
+                "orientations_deg": [0.0, 45.0, 90.0],
+                "peak_sigma_px": 1.0,
+                "reciprocal_pixels_per_inv_angstrom": 8.0,
+                "intensity_power": 2.0,
+            },
+            "matching": {"top_k_per_phase": 2},
+            "candidate_cifs": [
+                {"name": "cand_a", "phase": "phase_a", "path": str(cif_a)},
+                {"name": "cand_b", "phase": "phase_b", "path": str(cif_b)},
+            ],
+        })
+
+        roi_result = summary["roi_results"][0]
+        self.assertEqual(roi_result["best_phase"], "phase_a")
+        self.assertEqual(roi_result["top_phase_matches"][0]["phase"], "phase_a")
+        self.assertEqual(len(roi_result["top_phase_matches"]), 2)
+        self.assertLessEqual(len(roi_result["top_phase_matches"][0]["top_matches"]), 2)
+        scores = [m["correlation_score"] for m in roi_result["top_phase_matches"][0]["top_matches"]]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+        self.assertIsNotNone(roi_result["phase_margin"])
+        self.assertIn("radial_support_score", roi_result["top_phase_matches"][0])
+        self.assertTrue((roi_dir / "phase_orientation_topk.json").exists())
+
+    def test_stage2b_v4_ambiguous_when_phase_evidence_is_tied(self):
+        """v4 keeps ambiguous phase groups when two candidates have tied evidence."""
+        from fourdstem_pipeline.indexing import (
+            _generate_kinematic_template_stack,
+            run_stage2_indexing,
+        )
+
+        stage2_dir = self.output_dir / "stage2a_v4_amb"
+        roi_dir = stage2_dir / "roi_good"
+        roi_dir.mkdir(parents=True)
+        cif_a = self.output_dir / "v4_amb_a.cif"
+        cif_b = self.output_dir / "v4_amb_b.cif"
+        cif_text = (
+            "data_same\n_cell_length_a 2.0\n_cell_length_b 2.0\n_cell_length_c 2.0\n"
+            "_cell_angle_alpha 90\n_cell_angle_beta 90\n_cell_angle_gamma 90\n"
+        )
+        cif_a.write_text(cif_text, encoding="utf-8")
+        cif_b.write_text(cif_text, encoding="utf-8")
+        stack_a, _ = _generate_kinematic_template_stack(
+            {"a": 2.0, "b": 2.0, "c": 2.0, "alpha": 90.0, "beta": 90.0, "gamma": 90.0},
+            sig_shape=(32, 32), beam_center_yx=(16.0, 16.0),
+            max_index=1, orientations_deg=[0.0],
+            zone_axis=(0.0, 0.0, 1.0),
+            peak_sigma_px=1.0, reciprocal_pixels_per_inv_angstrom=8.0,
+            intensity_power=2.0,
+        )
+        roi_data_path = roi_dir / "roi_data.npy"
+        np.save(roi_data_path, stack_a[0][None, None, :, :].astype(np.float32))
+        (stage2_dir / "stage2_summary.json").write_text(
+            json.dumps({
+                "run_name": "v4_amb_stage2a",
+                "manifest": {"sig_shape": [32, 32]},
+                "roi_results": [{
+                    "name": "roi_good", "error": None, "n_bragg_peaks": 8,
+                    "background_fraction": 0.0, "sample_mask_coverage": 1.0,
+                    "beam_center_source": "stage1_com",
+                    "beam_center_yx": [16.0, 16.0], "sig_shape": [32, 32],
+                    "roi_data_path": str(roi_data_path),
+                    "bragg_summary_path": str(roi_dir / "bragg_summary.json"),
+                }],
+            }),
+            encoding="utf-8",
+        )
+
+        summary = run_stage2_indexing({
+            "stage2_dir": str(stage2_dir),
+            "output_dir": str(self.output_dir / "stage2b_v4_amb"),
+            "template_generation": {
+                "max_index": 1,
+                "zone_axis": [0, 0, 1],
+                "orientations_deg": [0.0],
+                "peak_sigma_px": 1.0,
+                "reciprocal_pixels_per_inv_angstrom": 8.0,
+                "intensity_power": 2.0,
+            },
+            "candidate_cifs": [
+                {"name": "cand_a", "phase": "phase_a", "path": str(cif_a)},
+                {"name": "cand_b", "phase": "phase_b", "path": str(cif_b)},
+            ],
+        })
+
+        roi_result = summary["roi_results"][0]
+        self.assertEqual(roi_result["phase_call"], "AMBIGUOUS")
+        self.assertEqual(roi_result["candidate_phase"], "phase_a / phase_b")
+        self.assertLess(roi_result["phase_margin"], summary["matching"]["phase_margin_threshold"])
+        self.assertIsNotNone(roi_result["ambiguity_reason"])
 
     def test_stage2b_backward_compat_zone_axis_singular(self):
         """zone_axis (singular) produces same result as zone_axes with one entry."""
