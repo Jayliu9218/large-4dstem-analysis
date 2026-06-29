@@ -777,11 +777,19 @@ def run_roi_bragg_for_rois(
         "Loading 4D-STEM data from %s (mem=%s, scan=%s, r_bin=%d)",
         data_path, mem, scan_shape_tuple, r_bin,
     )
-    cube = py4DSTEM.import_file(
-        str(data_path),
-        mem=mem,
-        scan=scan_shape_tuple,
-    )
+    suffix = Path(data_path).suffix.lower()
+    if suffix in (".h5", ".hdf5", ".emd"):
+        log.info("Using py4DSTEM.read() for HDF5/EMD file.")
+        cube = py4DSTEM.read(
+            str(data_path),
+            mem=mem,
+        )
+    else:
+        cube = py4DSTEM.import_file(
+            str(data_path),
+            mem=mem,
+            scan=scan_shape_tuple,
+        )
 
     # --- Verify import shape -------------------------------------------------
     actual_shape = tuple(int(v) for v in cube.data.shape)
