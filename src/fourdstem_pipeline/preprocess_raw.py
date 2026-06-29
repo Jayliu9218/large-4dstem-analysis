@@ -160,7 +160,7 @@ def _chunked_bin_R(datacube: Any, bin_factor: int) -> Any:
         row_mean = reshaped.mean(axis=(0, 2), dtype=np.float32)
         out[out_i, :, :, :] = _to_uint16_intensity(row_mean)
 
-    new_cube = py4DSTEM.io.datacube.DataCube(data=out)
+    new_cube = py4DSTEM.DataCube(data=out)
     _copy_calibration(datacube, new_cube, r_bin=bin_factor, q_bin=1)
     return new_cube
 
@@ -201,7 +201,7 @@ def _chunked_bin_Q(datacube: Any, bin_factor: int) -> Any:
         binned = binned.mean(axis=(3, 5), dtype=np.float32)
         out[nx_start:nx_end, :, :, :] = _to_uint16_intensity(binned)
 
-    new_cube = py4DSTEM.io.datacube.DataCube(data=out)
+    new_cube = py4DSTEM.DataCube(data=out)
     _copy_calibration(datacube, new_cube, r_bin=1, q_bin=bin_factor)
     return new_cube
 
