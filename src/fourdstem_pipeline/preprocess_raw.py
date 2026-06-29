@@ -91,22 +91,18 @@ def bin_and_export(
     original_shape = tuple(int(v) for v in cube.data.shape)
     log.info("Loaded: shape=%s", original_shape)
 
-    # --- Bin -----------------------------------------------------------------
-    # Use py4DSTEM's native bin_R/bin_Q for MEMMAP safety — they process
-    # memory-mapped arrays in chunks and won't allocate a full float32 copy
-    # of the raw data.  Convert to uint16 after binning to keep file sizes
-    # manageable.
+    # --- Bin (chunked, mmap-safe) --------------------------------------------
     if r_bin > 1:
-        log.info("Applying r_bin=%d (py4DSTEM native, mmap-safe)", r_bin)
-        cube.bin_R(r_bin)
+        log.info("Applying r_bin=%d (chunked, mmap-safe)", r_bin)
+        cube = _chunked_bin_R(cube, r_bin)
         cube.data = _to_uint16_intensity(cube.data)
         new_shape = tuple(int(v) for v in cube.data.shape)
         log.info("  after r_bin(%d): %s -> %s", r_bin, original_shape, new_shape)
         original_shape = new_shape
 
     if q_bin > 1:
-        log.info("Applying q_bin=%d (py4DSTEM native, mmap-safe)", q_bin)
-        cube.bin_Q(q_bin)
+        log.info("Applying q_bin=%d (chunked, mmap-safe)", q_bin)
+        cube = _chunked_bin_Q(cube, q_bin)
         cube.data = _to_uint16_intensity(cube.data)
         new_shape = tuple(int(v) for v in cube.data.shape)
         log.info("  after q_bin(%d): %s -> %s", q_bin, original_shape, new_shape)
@@ -122,6 +118,103 @@ def bin_and_export(
     final_shape = tuple(int(v) for v in cube.data.shape)
     log.info("Exported binned DataCube → %s  (shape=%s)", out_path, final_shape)
     return out_path
+
+
+def _chunked_bin_R(datacube: Any, bin_factor: int) -> Any:
+    """Mean-bin navigation axes in chunks — never loads the full array into RAM.
+
+    Processes one output row at a time: reads *bin_factor* input nav rows
+    from the memory-mapped source, computes the mean, writes to a memmap
+    output.  After binning, replaces ``datacube.data`` with the result.
+    """
+    import py4DSTEM
+
+    bin_factor = int(bin_factor)
+    if bin_factor <= 1:
+        return datacube
+
+    src = datacube.data  # memory-mapped or ndarray
+    r_nx, r_ny, q_nx, q_ny = (int(v) for v in src.shape)
+    crop_y = r_ny - (r_ny % bin_factor)
+    crop_x = r_nx - (r_nx % bin_factor)
+    out_ny = crop_y // bin_factor
+    out_nx = crop_x // bin_factor
+
+    # Create a temporary memmap for the binned output.
+    import tempfile, os
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".dat", prefix="binR_")
+    os.close(tmp_fd)
+    try:
+        out = np.memmap(tmp_path, dtype=np.float32, mode="w+", shape=(out_nx, out_ny, q_nx, q_ny))
+        # Process one output row at a time.
+        for out_i in range(out_nx):
+            in_slice = src[out_i * bin_factor : (out_i + 1) * bin_factor, :crop_y, :, :]
+            # mean over the bin_factor rows: (bin_factor, crop_y, q_nx, q_ny) -> (crop_y, q_nx, q_ny)
+            out[out_i, :, :, :] = in_slice.mean(axis=0, dtype=np.float32)
+
+        # Wrap result in a new DataCube.
+        new_cube = py4DSTEM.io.datacube.DataCube(data=out)
+        calibration = getattr(datacube, "calibration", None)
+        if calibration is not None:
+            new_cube.calibration = calibration
+            r_pixsize = calibration.get_R_pixel_size() * bin_factor
+            r_units = calibration.get_R_pixel_units()
+            new_cube.set_dim(0, [0, r_pixsize], units=r_units, name="Rx")
+            new_cube.set_dim(1, [0, r_pixsize], units=r_units, name="Ry")
+        return new_cube
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+
+
+def _chunked_bin_Q(datacube: Any, bin_factor: int) -> Any:
+    """Mean-bin detector axes in chunks — never loads the full array into RAM.
+
+    Processes one nav position at a time: reads the full detector pattern,
+    bins it, writes to a memmap output.
+    """
+    import py4DSTEM
+
+    bin_factor = int(bin_factor)
+    if bin_factor <= 1:
+        return datacube
+
+    src = datacube.data
+    r_nx, r_ny, q_nx, q_ny = (int(v) for v in src.shape)
+    crop_x = q_nx - (q_nx % bin_factor)
+    crop_y = q_ny - (q_ny % bin_factor)
+    out_qx = crop_x // bin_factor
+    out_qy = crop_y // bin_factor
+
+    import tempfile, os
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".dat", prefix="binQ_")
+    os.close(tmp_fd)
+    try:
+        out = np.memmap(tmp_path, dtype=np.float32, mode="w+", shape=(r_nx, r_ny, out_qx, out_qy))
+        # Process one nav position at a time.
+        for ny in range(r_ny):
+            for nx in range(r_nx):
+                dp = np.asarray(src[nx, ny, :crop_x, :crop_y], dtype=np.float32)
+                binned = dp.reshape(out_qx, bin_factor, out_qy, bin_factor).mean(axis=(1, 3))
+                out[nx, ny, :, :] = binned
+
+        new_cube = py4DSTEM.io.datacube.DataCube(data=out)
+        calibration = getattr(datacube, "calibration", None)
+        if calibration is not None:
+            new_cube.calibration = calibration
+            q_pixsize = calibration.get_Q_pixel_size() * bin_factor
+            q_units = calibration.get_Q_pixel_units()
+            new_cube.set_dim(2, [0, q_pixsize], units=q_units, name="Qx")
+            new_cube.set_dim(3, [0, q_pixsize], units=q_units, name="Qy")
+        return new_cube
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+
+
+# -- Keep old helpers for reference (unused by the main pipeline) -------------
 
 
 def _bin_R_mean_uint16(datacube: Any, bin_factor: int) -> Any:
