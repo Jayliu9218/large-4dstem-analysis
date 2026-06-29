@@ -20,7 +20,13 @@ import numpy as np
 import yaml
 
 from .contracts import is_roi_ready_for_indexing
-from .export import save_bar_png, save_cluster_phase_map, save_phase_match_map, save_png
+from .export import (
+    mask_center_for_display,
+    save_bar_png,
+    save_cluster_phase_map,
+    save_phase_match_map,
+    save_png,
+)
 
 log = logging.getLogger(__name__)
 
@@ -1193,13 +1199,15 @@ def _save_match_visuals(
         return
 
     try:
-        # Best template image
+        # Best template image — use viridis for consistency with pyxem style.
         best_template = best["stack"][best["template_idx"]]
-        save_png(roi_dir / "template_best_match.png", best_template)
+        save_png(roi_dir / "template_best_match.png", best_template, cmap="viridis")
 
-        # Overlay: mean DP (gray) + explicit green template peaks.
+        # Overlay: mean DP (viridis) + explicit green template peaks.
+        # Apply pyxem-style direct-beam masking for cleaner visual focus.
         base = np.asarray(mean_dp, dtype=np.float32)
-        overlay = _gray_rgb(base)
+        base_masked = mask_center_for_display(base, radius_px=35.0)
+        overlay = _gray_rgb(base_masked, cmap="viridis")
         tmpl_norm = _scale_unit_interval(best_template)
         peak_mask = tmpl_norm >= 0.20
         green = (tmpl_norm * 255).astype(np.uint8)
@@ -1424,24 +1432,33 @@ def _extract_cif_number(text: str, token: str) -> float | None:
     return None
 
 
-def _gray_rgb(image: np.ndarray) -> np.ndarray:
-    """Return a log-scaled grayscale RGB image for diffraction diagnostics."""
+def _gray_rgb(image: np.ndarray, *, cmap: str = "gray") -> np.ndarray:
+    """Return a log-scaled RGB image for diffraction diagnostics.
+
+    Parameters
+    ----------
+    cmap:
+        Colormap name: ``"gray"`` (default) or ``"viridis"``.
+    """
+    from .export import _get_colormap
+
     base = np.asarray(image, dtype=np.float32)
     finite = base[np.isfinite(base)]
     if finite.size == 0:
-        gray = np.zeros(base.shape, dtype=np.uint8)
+        scaled = np.zeros(base.shape, dtype=np.uint8)
     else:
         lo, hi = float(np.percentile(finite, 1)), float(np.percentile(finite, 99))
         if hi <= lo:
             hi = lo + 1.0
-        gray = np.clip(
+        scaled = np.clip(
             (np.log1p(np.maximum(base, 0.0)) - np.log1p(max(lo, 0.0)))
             / max(np.log1p(max(hi, 0.0)) - np.log1p(max(lo, 0.0)), 1e-12)
             * 255.0,
             0,
             255,
         ).astype(np.uint8)
-    return np.stack([gray, gray, gray], axis=-1).copy()
+    lut = _get_colormap(cmap)
+    return lut[scaled]
 
 
 def _draw_cross(
@@ -1629,7 +1646,7 @@ def _save_experimental_template_peak_overlay(
     tol = _template_peak_tolerance_px(template_metadata, src_shape, dst_shape)
     assignments = _peak_match_assignments(template_display, measured, tol)
 
-    canvas = _gray_rgb(mean_dp)
+    canvas = _gray_rgb(mask_center_for_display(mean_dp, radius_px=35.0), cmap="viridis")
     for idx in assignments["unmatched_template_indices"]:
         _draw_cross(canvas, template_display[idx, 0], template_display[idx, 1], (30, 120, 255), radius=4)
     for idx in assignments["unmatched_measured_indices"]:
@@ -1731,9 +1748,9 @@ def _save_radial_q_profile_validation(
     norm = np.clip(norm / denom, 0, 1)
 
     canvas = np.full((420, 760, 3), 255, dtype=np.uint8)
-    margin_l, margin_r, margin_t, margin_b = 58, 28, 26, 48
-    x0, x1 = margin_l, canvas.shape[1] - margin_r - 1
-    y0, y1 = margin_t, canvas.shape[0] - margin_b - 1
+    ml, mr, mt, mb = 46, 14, 16, 34  # tight margins — pyxem-style compact layout
+    x0, x1 = ml, canvas.shape[1] - mr - 1
+    y0, y1 = mt, canvas.shape[0] - mb - 1
     canvas[y0:y1 + 1, x0] = 35
     canvas[y1, x0:x1 + 1] = 35
     for frac in (0.25, 0.5, 0.75):

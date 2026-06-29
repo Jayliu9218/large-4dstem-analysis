@@ -11,6 +11,58 @@ import zlib
 import numpy as np
 
 
+# ---------------------------------------------------------------------------
+# Colormaps — 256×3 uint8 LUTs for dependency-free pseudocolor rendering.
+# ---------------------------------------------------------------------------
+
+
+def _interpolate_colormap(control_points: list[tuple[float, float, float]], n: int = 256) -> np.ndarray:
+    """Linearly interpolate *(position, r, g, b)* control points to *n* entries."""
+    positions = np.linspace(0, 1, len(control_points))
+    rgb = np.asarray(control_points, dtype=np.float64)
+    out = np.zeros((n, 3), dtype=np.float64)
+    for channel in range(3):
+        out[:, channel] = np.interp(np.linspace(0, 1, n), positions, rgb[:, channel])
+    return np.clip(out * 255, 0, 255).astype(np.uint8)
+
+
+# Canonical matplotlib viridis control points (position, r, g, b).
+_VIRIDIS_CONTROL: list[tuple[float, float, float]] = [
+    (0.267004, 0.004874, 0.329415),   # 0.00  — deep purple
+    (0.229739, 0.322361, 0.545706),   # 0.25  — blue
+    (0.127568, 0.566949, 0.550556),   # 0.50  — teal
+    (0.369214, 0.788888, 0.382914),   # 0.75  — green
+    (0.993248, 0.906157, 0.143936),   # 1.00  — yellow
+]
+
+# Grayscale LUT for consistency.
+_GRAY_CONTROL: list[tuple[float, float, float]] = [
+    (0.0, 0.0, 0.0),
+    (1.0, 1.0, 1.0),
+]
+
+_COLORMAPS: dict[str, np.ndarray] = {
+    "viridis": _interpolate_colormap(_VIRIDIS_CONTROL),
+    "gray": _interpolate_colormap(_GRAY_CONTROL),
+}
+
+
+def _get_colormap(name: str = "gray") -> np.ndarray:
+    """Return a 256×3 uint8 colormap LUT by name."""
+    return _COLORMAPS.get(name, _COLORMAPS["gray"])
+
+
+# ---------------------------------------------------------------------------
+# Tight-layout margin constants (pyxem-style compact plots).
+# ---------------------------------------------------------------------------
+
+# Default tight margins — match pyxem's compact, publication-ready aesthetic.
+_TIGHT_MARGIN_L = 46
+_TIGHT_MARGIN_R = 14
+_TIGHT_MARGIN_T = 16
+_TIGHT_MARGIN_B = 34
+
+
 def save_summary(output_dir: str | Path, summary: dict[str, Any]) -> Path:
     path = Path(output_dir) / "workflow_summary.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -35,13 +87,28 @@ def save_npz(output_dir: str | Path, name: str, **arrays: np.ndarray) -> Path:
     return path
 
 
-def save_png(path: str | Path, image: np.ndarray, *, percentiles: tuple[float, float] = (1, 99)) -> Path:
-    """Save a 2D scalar image or RGB uint8 image as PNG without extra dependencies."""
+def save_png(
+    path: str | Path,
+    image: np.ndarray,
+    *,
+    percentiles: tuple[float, float] = (1, 99),
+    cmap: str = "gray",
+) -> Path:
+    """Save a 2D scalar image or RGB uint8 image as PNG without extra dependencies.
+
+    Parameters
+    ----------
+    cmap:
+        Colormap name for 2D images.  ``"gray"`` (default), ``"viridis"``.
+        Ignored for 3D RGB inputs.
+    """
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     arr = np.asarray(image)
     if arr.ndim == 2:
-        rgb = np.repeat(_scale_to_uint8(arr, percentiles)[..., None], 3, axis=-1)
+        scaled = _scale_to_uint8(arr, percentiles)
+        lut = _get_colormap(cmap)
+        rgb = lut[scaled]
     elif arr.ndim == 3 and arr.shape[-1] == 3:
         rgb = arr.astype(np.uint8, copy=False) if arr.dtype == np.uint8 else _scale_to_uint8(arr, percentiles)
     else:
@@ -79,13 +146,21 @@ def save_annotated_label_png(path: str | Path, labels: np.ndarray, *, title: str
     return save_png(path, canvas)
 
 
-def save_profile_png(path: str | Path, radii: np.ndarray, profiles: np.ndarray, *, size: tuple[int, int] = (720, 420)) -> Path:
+def save_profile_png(
+    path: str | Path,
+    radii: np.ndarray,
+    profiles: np.ndarray,
+    *,
+    size: tuple[int, int] = (720, 420),
+    xlabel: str = "",
+    ylabel: str = "",
+) -> Path:
     """Save the mean radial profile as a simple line plot PNG."""
     width, height = size
     canvas = np.full((height, width, 3), 255, dtype=np.uint8)
-    margin_l, margin_r, margin_t, margin_b = 58, 22, 24, 46
-    x0, x1 = margin_l, width - margin_r - 1
-    y0, y1 = margin_t, height - margin_b - 1
+    ml, mr, mt, mb = _TIGHT_MARGIN_L, _TIGHT_MARGIN_R, _TIGHT_MARGIN_T, _TIGHT_MARGIN_B
+    x0, x1 = ml, width - mr - 1
+    y0, y1 = mt, height - mb - 1
 
     canvas[y0:y1 + 1, x0] = 30
     canvas[y1, x0:x1 + 1] = 30
@@ -101,6 +176,12 @@ def save_profile_png(path: str | Path, radii: np.ndarray, profiles: np.ndarray, 
     py = y1 - _normalize_to_span(profile, 0, y1 - y0)
     points = np.column_stack([px.astype(int), py.astype(int)])
     _draw_polyline(canvas, points, color=(25, 90, 155))
+
+    if xlabel:
+        _draw_text(canvas, xlabel, x0 + (x1 - x0) // 2 - len(xlabel) * 3, height - mb + 8, color=(70, 70, 70), scale=1)
+    if ylabel:
+        _draw_text_vertical(canvas, ylabel, 8, mt + (y1 - mt) // 2 + len(ylabel) * 3, color=(70, 70, 70), scale=1)
+
     return save_png(path, canvas)
 
 
@@ -111,12 +192,14 @@ def save_lines_png(
     *,
     colors: list[tuple[int, int, int]] | None = None,
     size: tuple[int, int] = (720, 420),
+    xlabel: str = "",
+    ylabel: str = "",
 ) -> Path:
     width, height = size
     canvas = np.full((height, width, 3), 255, dtype=np.uint8)
-    margin_l, margin_r, margin_t, margin_b = 58, 22, 24, 46
-    x0, x1 = margin_l, width - margin_r - 1
-    y0, y1 = margin_t, height - margin_b - 1
+    ml, mr, mt, mb = _TIGHT_MARGIN_L, _TIGHT_MARGIN_R, _TIGHT_MARGIN_T, _TIGHT_MARGIN_B
+    x0, x1 = ml, width - mr - 1
+    y0, y1 = mt, height - mb - 1
     canvas[y0:y1 + 1, x0] = 30
     canvas[y1, x0:x1 + 1] = 30
     for frac in np.linspace(0.25, 0.75, 3):
@@ -139,33 +222,52 @@ def save_lines_png(
     for idx, series in enumerate(arr):
         py = (y1 - (series - ymin) / (ymax - ymin) * (y1 - y0)).astype(int)
         _draw_polyline(canvas, np.column_stack([px, py]), color=palette[idx % len(palette)])
+
+    if xlabel:
+        _draw_text(canvas, xlabel, x0 + (x1 - x0) // 2 - len(xlabel) * 3, height - mb + 8, color=(70, 70, 70), scale=1)
+    if ylabel:
+        _draw_text_vertical(canvas, ylabel, 8, mt + (y1 - mt) // 2 + len(ylabel) * 3, color=(70, 70, 70), scale=1)
+
     return save_png(path, canvas)
 
 
-def save_bar_png(path: str | Path, values: np.ndarray, *, size: tuple[int, int] = (720, 420)) -> Path:
+def save_bar_png(
+    path: str | Path,
+    values: np.ndarray,
+    *,
+    size: tuple[int, int] = (720, 420),
+    xlabel: str = "",
+    ylabel: str = "",
+) -> Path:
     arr = np.asarray(values, dtype=np.float32)
     if arr.ndim == 1:
         arr = arr[:, None]
     width, height = size
     canvas = np.full((height, width, 3), 255, dtype=np.uint8)
-    margin_l, margin_r, margin_t, margin_b = 58, 22, 24, 46
-    plot_w = width - margin_l - margin_r
-    plot_h = height - margin_t - margin_b
+    ml, mr, mt, mb = _TIGHT_MARGIN_L, _TIGHT_MARGIN_R, _TIGHT_MARGIN_T, _TIGHT_MARGIN_B
+    plot_w = width - ml - mr
+    plot_h = height - mt - mb
     vmax = max(float(np.nanmax(np.abs(arr))), 1e-12)
     groups, bars = arr.shape
     slot = max(1, plot_w // max(groups, 1))
     bar_w = max(1, slot // max(bars + 1, 2))
     palette = _label_palette()
-    baseline = height - margin_b - 1
-    canvas[margin_t:baseline + 1, margin_l] = 30
-    canvas[baseline, margin_l:width - margin_r] = 30
+    baseline = height - mb - 1
+    canvas[mt:baseline + 1, ml] = 30
+    canvas[baseline, ml:width - mr] = 30
     for group in range(groups):
         for bar in range(bars):
             value = max(float(arr[group, bar]), 0.0)
             h = int(value / vmax * plot_h)
-            x0 = margin_l + group * slot + bar * bar_w + 2
-            x1 = min(x0 + bar_w, width - margin_r)
-            canvas[baseline - h:baseline, x0:x1] = palette[bar % len(palette)]
+            bx0 = ml + group * slot + bar * bar_w + 2
+            bx1 = min(bx0 + bar_w, width - mr)
+            canvas[baseline - h:baseline, bx0:bx1] = palette[bar % len(palette)]
+
+    if xlabel:
+        _draw_text(canvas, xlabel, ml + plot_w // 2 - len(xlabel) * 3, height - mb + 8, color=(70, 70, 70), scale=1)
+    if ylabel:
+        _draw_text_vertical(canvas, ylabel, 8, mt + plot_h // 2 + len(ylabel) * 3, color=(70, 70, 70), scale=1)
+
     return save_png(path, canvas)
 
 
@@ -604,6 +706,70 @@ def _draw_text(canvas: np.ndarray, text: str, x: int, y: int, *, color: tuple[in
                         continue
                     canvas[max(y0, 0) : min(y1, canvas.shape[0]), max(x0, 0) : min(x1, canvas.shape[1])] = color
         cursor += 6 * scale
+
+
+def _draw_text_vertical(
+    canvas: np.ndarray, text: str, x: int, y: int, *, color: tuple[int, int, int], scale: int = 1,
+) -> None:
+    """Draw text rotated 90° counter-clockwise (bottom-to-top)."""
+    cursor = int(y)
+    for char in text:
+        glyph = _FONT_5X7.get(char.upper(), _FONT_5X7[" "])
+        for gy, row in enumerate(glyph):
+            for gx, bit in enumerate(row):
+                if bit == "1":
+                    # Rotate: (gx, gy) → (-gy, gx) in glyph space
+                    x0 = x - gy * scale
+                    y0 = cursor + gx * scale
+                    if x0 < 0 or y0 < 0 or x0 >= canvas.shape[1] or y0 >= canvas.shape[0]:
+                        continue
+                    x1 = min(x0 + scale, canvas.shape[1])
+                    y1 = min(y0 + scale, canvas.shape[0])
+                    canvas[max(y0, 0):y1, max(x0, 0):x1] = color
+        cursor += 6 * scale
+
+
+def mask_center_for_display(
+    image: np.ndarray,
+    center_yx: tuple[float, float] | None = None,
+    radius_px: float = 35.0,
+    *,
+    outer_radius_px: float | None = None,
+) -> np.ndarray:
+    """Zero out the direct-beam disk (and optionally the outer region) for display.
+
+    Mimics pyxem's ``get_direct_beam_mask(radius)`` applied before
+    ``plot_images`` — creates a "donut" that focuses attention on the
+    diffraction ring where Bragg peaks actually reside.
+
+    Parameters
+    ----------
+    image:
+        2D scalar diffraction pattern.
+    center_yx:
+        Beam centre in *(y, x)* pixel coordinates.  Defaults to the
+        geometric centre of the image.
+    radius_px:
+        Radius in pixels of the central mask (default 35, matching pyxem's
+        typical direct-beam exclusion).
+    outer_radius_px:
+        If set, also zero out pixels beyond this radius.
+
+    Returns
+    -------
+    np.ndarray
+        A copy of *image* with the specified region(s) set to zero.
+    """
+    arr = np.asarray(image, dtype=np.float32).copy()
+    h, w = arr.shape
+    cy, cx = center_yx if center_yx is not None else ((h - 1) / 2.0, (w - 1) / 2.0)
+    yy, xx = np.indices(arr.shape)
+    r = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    if radius_px > 0:
+        arr[r < radius_px] = 0.0
+    if outer_radius_px is not None and outer_radius_px > 0:
+        arr[r > outer_radius_px] = 0.0
+    return arr
 
 
 def _write_rgb_png(path: Path, rgb: np.ndarray) -> None:
