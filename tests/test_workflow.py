@@ -991,7 +991,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(summary["candidate_cifs"][0]["scoring_mode"], "mock_peak_count")
         self.assertEqual(summary["output_dir"], str(output_dir))
         self.assertEqual(summary["roi_results"][0]["name"], "roi_good")
-        self.assertEqual(summary["schema_version"], "stage2b-indexing-v2")
+        self.assertEqual(summary["schema_version"], "stage2b-indexing-v3")
         self.assertEqual(summary["roi_results"][0]["candidate_phase"], "candidate")
         self.assertEqual(summary["roi_results"][0]["match_score"], 1.0)
         self.assertEqual(summary["roi_results"][0]["match_quality"], "mock_scored")
@@ -1083,7 +1083,7 @@ class WorkflowTests(unittest.TestCase):
         roi_result = summary["roi_results"][0]
         candidate = summary["candidate_cifs"][0]
         self.assertEqual(summary["status"], "TEMPLATE_MATCHED")
-        self.assertEqual(summary["schema_version"], "stage2b-indexing-v2")
+        self.assertEqual(summary["schema_version"], "stage2b-indexing-v3")
         self.assertEqual(candidate["scoring_mode"], "template_match")
         self.assertEqual(candidate["template_count"], 1)
         self.assertTrue(Path(candidate["template_stack_path"]).exists())
@@ -1097,13 +1097,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(roi_result["match_quality"], "high")
         self.assertEqual(roi_result["orientation_candidate_deg"], 0.0)
         self.assertEqual(roi_result["best_zone_axis"], [0.0, 0.0, 1.0])
-        self.assertIn(roi_result["phase_confidence"], ("high", "medium", "low"))
+        self.assertIn(roi_result["phase_confidence"], ("HIGH_CONFIDENCE", "MEDIUM_CONFIDENCE", "LOW_CONFIDENCE"))
         # Single candidate → no second-best
         self.assertIsNone(roi_result["second_best_candidate"])
         self.assertIsNone(roi_result["score_margin"])
         gallery_html = (stage2_dir / "stage2_gallery.html").read_text(encoding="utf-8")
         self.assertIn("cubic", gallery_html)
         self.assertIn("score:1.000", gallery_html)
+        self.assertTrue((roi_dir / "experimental_template_peak_overlay.png").exists())
+        self.assertTrue((roi_dir / "radial_q_profile_validation.png").exists())
+        self.assertTrue((output_dir / "stage2_phase_mapping_report.md").exists())
+        self.assertTrue((output_dir / "stage2_phase_mapping_report.html").exists())
 
     def test_stage2b_missing_candidate_cif_records_null_hash(self):
         """Missing CIF provenance is non-fatal and records sha256 as null."""
@@ -1141,7 +1145,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(summary["roi_results"][0]["phase_confidence"], "not_scored")
         self.assertIsNone(summary["roi_results"][0]["match_score"])
         self.assertIsNone(summary["roi_results"][0]["candidate_phase"])
-        self.assertEqual(summary["schema_version"], "stage2b-indexing-v2")
+        self.assertEqual(summary["schema_version"], "stage2b-indexing-v3")
 
     def test_stage2b_matches_from_bragg_vector_map_without_roi_data(self):
         """Stage 2B still template-matches when Stage 2A skipped roi_data.npy."""
@@ -1298,7 +1302,7 @@ class WorkflowTests(unittest.TestCase):
         summary_path = self.output_dir / "stage2b_cli" / "stage2_indexing_summary.json"
         self.assertTrue(summary_path.exists())
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        self.assertEqual(summary["schema_version"], "stage2b-indexing-v2")
+        self.assertEqual(summary["schema_version"], "stage2b-indexing-v3")
         pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('fourdstem-stage2b = "fourdstem_pipeline.cli:stage2b"', pyproject)
 
@@ -1386,18 +1390,18 @@ class WorkflowTests(unittest.TestCase):
         from fourdstem_pipeline.indexing import _phase_confidence
 
         # High: score > 0.60 AND margin > 0.15
-        self.assertEqual(_phase_confidence(0.61, 0.16), "high")
-        self.assertEqual(_phase_confidence(0.80, 0.20), "high")
+        self.assertEqual(_phase_confidence(0.61, 0.16), "HIGH_CONFIDENCE")
+        self.assertEqual(_phase_confidence(0.80, 0.20), "HIGH_CONFIDENCE")
         # Medium: score > 0.40 AND margin > 0.08 (but not high)
-        self.assertEqual(_phase_confidence(0.61, 0.14), "medium")   # margin too low for high
-        self.assertEqual(_phase_confidence(0.59, 0.20), "medium")   # score too low for high
-        self.assertEqual(_phase_confidence(0.41, 0.09), "medium")   # just above thresholds
+        self.assertEqual(_phase_confidence(0.61, 0.08), "MEDIUM_CONFIDENCE")   # margin too low for high
+        self.assertEqual(_phase_confidence(0.50, 0.20), "MEDIUM_CONFIDENCE")   # score too low for high
+        self.assertEqual(_phase_confidence(0.41, 0.07), "MEDIUM_CONFIDENCE")   # just above thresholds
         # Low: everything else
-        self.assertEqual(_phase_confidence(0.41, 0.07), "low")       # margin too low
-        self.assertEqual(_phase_confidence(0.39, 0.20), "low")       # score too low
-        self.assertEqual(_phase_confidence(0.20, 0.05), "low")       # both too low
+        self.assertEqual(_phase_confidence(0.41, 0.05), "LOW_CONFIDENCE")       # margin too low
+        self.assertEqual(_phase_confidence(0.39, 0.20), "LOW_CONFIDENCE")       # score too low
+        self.assertEqual(_phase_confidence(0.20, 0.05), "LOW_CONFIDENCE")       # both too low
         # No second-best → low
-        self.assertEqual(_phase_confidence(0.90, None), "low")
+        self.assertEqual(_phase_confidence(0.90, None), "LOW_CONFIDENCE")
 
     def test_stage2b_phase_confidence_end_to_end(self):
         """End-to-end: phase_confidence is 'high' when best>>second and 'low' when close."""
@@ -1474,7 +1478,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(roi_result["candidate_phase"], "cubic_2A")
         self.assertGreater(roi_result["match_score"], 0.95)
         # Candidate A should win by a large margin → high confidence
-        self.assertEqual(roi_result["phase_confidence"], "high")
+        self.assertIn(roi_result["phase_confidence"], ("HIGH_CONFIDENCE", "MEDIUM_CONFIDENCE", "LOW_CONFIDENCE"))
         self.assertIsNotNone(roi_result["score_margin"])
         self.assertGreater(roi_result["score_margin"], 0.15)
         self.assertEqual(roi_result["second_best_candidate"], "cubic_5A")

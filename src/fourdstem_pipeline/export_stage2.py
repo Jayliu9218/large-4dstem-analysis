@@ -586,6 +586,8 @@ _GALLERY_PNG_SPEC: list[tuple[str, str]] = [
     ("bragg_peak_radius_histogram.png", "Radial distance histogram of detected peaks"),
     ("template_best_match.png", "Best-matching kinematic template (Stage 2B)"),
     ("template_match_overlay.png", "Template peaks overlaid on mean DP (Stage 2B)"),
+    ("experimental_template_peak_overlay.png", "Experimental-template peak overlay: green=matched, red=unexplained experiment, blue=unmatched template"),
+    ("radial_q_profile_validation.png", "Radial q-profile validation before 2D orientation matching"),
     ("correlation_vs_angle.png", "Correlation vs. in-plane orientation angle (Stage 2B)"),
 ]
 

@@ -288,6 +288,18 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         log.warning("Failed to update Stage 2 PNG gallery: %s", exc)
 
+    try:
+        report_md, report_html = _write_stage2b_phase_mapping_report(
+            output_dir,
+            summary,
+            stage2a_summary,
+            phase_map_path=phase_map_path,
+            phase_legend_path=phase_legend_path,
+        )
+        log.info("Stage 2B phase mapping report saved: %s, %s", report_md, report_html)
+    except Exception as exc:
+        log.warning("Failed to write Stage 2B phase mapping report: %s", exc)
+
     return summary
 
 
@@ -393,6 +405,245 @@ def _load_stage1_contrast_image(
     return None
 
 
+def _write_stage2b_phase_mapping_report(
+    output_dir: Path,
+    summary: dict[str, Any],
+    stage2a_summary: dict[str, Any],
+    *,
+    phase_map_path: Path | None,
+    phase_legend_path: Path | None,
+) -> tuple[Path, Path]:
+    """Write a human-readable Stage 2B phase-map interpretation report."""
+    md_path = output_dir / "stage2_phase_mapping_report.md"
+    html_path = output_dir / "stage2_phase_mapping_report.html"
+    roi_results = summary.get("roi_results", [])
+    phase_fractions = _phase_map_fractions(summary, stage2a_summary)
+    low_reasons = _phase_mapping_low_confidence_reasons(roi_results)
+
+    lines: list[str] = [
+        "# Stage 2B Phase Mapping Report",
+        "",
+        f"**Status:** `{summary.get('status', 'unknown')}`",
+        f"**Schema:** `{summary.get('schema_version', 'unknown')}`",
+        f"**Accepted ROIs:** `{summary.get('accepted_roi_count', 0)}`",
+        f"**Templates generated:** `{(summary.get('template_generation') or {}).get('templates_generated', 0)}`",
+        "",
+        "## Outputs",
+        "",
+    ]
+    if phase_map_path is not None:
+        lines.append(f"- Phase map: `{phase_map_path.name}`")
+    if phase_legend_path is not None:
+        lines.append(f"- Legend: `{phase_legend_path.name}`")
+    lines.extend([
+        "- Raw machine-readable results: `stage2_indexing_summary.json`",
+        "",
+        "## What The Phase Map Means",
+        "",
+        "The PNG phase map is a Stage 1 cluster-label map recolored by the best current Stage 2B candidate call. "
+        "It is not a point-by-point crystallographic indexing result like EBSD. Each pixel inherits the phase assigned "
+        "to its Stage 1 fingerprint cluster representative.",
+        "",
+        "## Phase Fractions From The Current Map",
+        "",
+        "| Phase call | Fraction | Pixels | Source clusters |",
+        "| --- | ---: | ---: | --- |",
+    ])
+    if phase_fractions:
+        for row in phase_fractions:
+            lines.append(
+                f"| `{row['phase']}` | {row['fraction']:.2%} | {row['pixels']} | `{row['clusters']}` |"
+            )
+    else:
+        lines.append("| _No mapped phase labels_ | - | - | - |")
+
+    lines.extend([
+        "",
+        "## Why Confidence Is Low",
+        "",
+    ])
+    for reason in low_reasons:
+        lines.append(f"- {reason}")
+
+    lines.extend([
+        "",
+        "## Per-ROI Matching Evidence",
+        "",
+        "| ROI | Cluster | Phase call | Confidence | Corr. score | Margin | Hybrid | Observable template matched | q residual | Runner-up | Phase call mode |",
+        "| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+    ])
+    cluster_by_name = {
+        str(r.get("name")): r.get("cluster_id")
+        for r in stage2a_summary.get("roi_results", [])
+    }
+    for r in roi_results:
+        lines.append(
+            "| "
+            f"`{r.get('name', '?')}` | "
+            f"{_fmt_report_value(cluster_by_name.get(str(r.get('name'))))} | "
+            f"`{_fmt_report_value(r.get('candidate_phase'))}` | "
+            f"`{_fmt_report_value(r.get('phase_confidence'))}` | "
+            f"{_fmt_report_float(r.get('match_score'))} | "
+            f"{_fmt_report_float(r.get('score_margin'))} | "
+            f"{_fmt_report_float(r.get('hybrid_score'))} | "
+            f"{_fmt_report_float(r.get('matched_observable_template_fraction'))} | "
+            f"{_fmt_report_float(r.get('mean_q_residual'))} | "
+            f"`{_fmt_report_value(r.get('second_best_candidate'))}` | "
+            f"`{_fmt_report_value(r.get('phase_call'))}` |"
+        )
+
+    lines.extend([
+        "",
+        "## Confidence Thresholds Used",
+        "",
+        "- `HIGH_CONFIDENCE`: correlation score > 0.55, score margin > 0.10, matched template fraction > 0.50, and mean q residual < 5 px.",
+        "- `MEDIUM_CONFIDENCE`: correlation score > 0.40, score margin > 0.06, and matched template fraction > 0.30.",
+        "- `LOW_CONFIDENCE`: scored, but one or more of the above criteria failed.",
+        "- `AMBIGUOUS` phase calls are downgraded to `LOW_CONFIDENCE` even when raw scores look adequate.",
+        "",
+        "## Practical Interpretation",
+        "",
+        "Use this map as a screening visualization: it shows which Stage 1 fingerprint clusters currently prefer which candidate phase group. "
+        "Do not treat it as a confirmed EBSD-equivalent phase assignment until the ambiguous candidate groups separate and the matched-template fractions improve.",
+        "",
+    ])
+
+    markdown = "\n".join(lines)
+    md_path.write_text(markdown, encoding="utf-8")
+    html_path.write_text(_stage2b_report_html(markdown, phase_map_path, phase_legend_path), encoding="utf-8")
+    return md_path, html_path
+
+
+def _phase_map_fractions(
+    summary: dict[str, Any],
+    stage2a_summary: dict[str, Any],
+) -> list[dict[str, Any]]:
+    labels = _load_stage1_label_map(stage2a_summary)
+    if labels is None:
+        return []
+    roi_by_name = {str(r.get("name")): r for r in stage2a_summary.get("roi_results", [])}
+    best_by_cluster: dict[int, dict[str, Any]] = {}
+    for r in summary.get("roi_results", []):
+        phase = r.get("candidate_phase")
+        if not phase:
+            continue
+        stage2a_roi = roi_by_name.get(str(r.get("name")))
+        if not stage2a_roi or stage2a_roi.get("cluster_id") is None:
+            continue
+        cluster_id = int(stage2a_roi["cluster_id"])
+        score = r.get("match_score")
+        score_value = float(score) if score is not None else -np.inf
+        previous = best_by_cluster.get(cluster_id)
+        previous_score = float(previous.get("match_score", -np.inf)) if previous else -np.inf
+        if previous is None or score_value >= previous_score:
+            best_by_cluster[cluster_id] = r
+
+    total_mapped = 0
+    by_phase: dict[str, dict[str, Any]] = {}
+    for cluster_id, r in best_by_cluster.items():
+        count = int(np.sum(labels == cluster_id))
+        if count <= 0:
+            continue
+        total_mapped += count
+        phase = str(r.get("candidate_phase"))
+        row = by_phase.setdefault(phase, {"phase": phase, "pixels": 0, "clusters": []})
+        row["pixels"] += count
+        row["clusters"].append(str(cluster_id))
+
+    if total_mapped <= 0:
+        return []
+    result = []
+    for row in by_phase.values():
+        result.append({
+            "phase": row["phase"],
+            "pixels": row["pixels"],
+            "fraction": row["pixels"] / total_mapped,
+            "clusters": ", ".join(row["clusters"]),
+        })
+    return sorted(result, key=lambda x: x["pixels"], reverse=True)
+
+
+def _phase_mapping_low_confidence_reasons(roi_results: list[dict[str, Any]]) -> list[str]:
+    if not roi_results:
+        return ["No Stage 2B ROI match results were available."]
+    reasons: list[str] = []
+    ambiguous = sum(1 for r in roi_results if r.get("phase_call") == "AMBIGUOUS")
+    if ambiguous:
+        reasons.append(f"{ambiguous}/{len(roi_results)} ROI matches are `AMBIGUOUS`, meaning multiple candidate phases or candidate groups remain effectively tied.")
+    margins = [float(r["score_margin"]) for r in roi_results if r.get("score_margin") is not None]
+    if margins:
+        reasons.append(
+            f"Correlation score margins are small: max {max(margins):.4f}, median {float(np.median(margins)):.4f}. "
+            "Medium confidence requires margin > 0.06 and high confidence requires > 0.10."
+        )
+    matched = [
+        float(r["matched_observable_template_fraction"])
+        for r in roi_results
+        if r.get("matched_observable_template_fraction") is not None
+    ]
+    if matched:
+        reasons.append(
+            f"Matched observable template fractions are low: max {max(matched):.3f}, median {float(np.median(matched)):.3f}. "
+            "Medium confidence expects > 0.30 and high confidence expects > 0.50."
+        )
+    unexplained = [
+        float(r["unexplained_experiment_fraction"])
+        for r in roi_results
+        if r.get("unexplained_experiment_fraction") is not None
+    ]
+    if unexplained:
+        reasons.append(
+            f"A large fraction of experimental peaks remains unexplained: median {float(np.median(unexplained)):.3f}."
+        )
+    return reasons or ["The current results did not expose enough confidence diagnostics to explain the tier."]
+
+
+def _stage2b_report_html(
+    markdown: str,
+    phase_map_path: Path | None,
+    phase_legend_path: Path | None,
+) -> str:
+    def esc(text: Any) -> str:
+        return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    body = [
+        "<!doctype html>",
+        "<html><head><meta charset=\"utf-8\">",
+        "<title>Stage 2B Phase Mapping Report</title>",
+        "<style>body{font-family:system-ui,-apple-system,sans-serif;margin:28px;line-height:1.45;color:#222;max-width:1200px}"
+        "table{border-collapse:collapse;margin:14px 0;width:100%;font-size:13px}th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}"
+        "th{background:#f4f4f4}code{background:#f5f5f5;padding:1px 4px;border-radius:3px}pre{white-space:pre-wrap;background:#fafafa;padding:16px;border:1px solid #ddd}"
+        ".figs{display:flex;gap:24px;align-items:flex-start;margin:16px 0}.figs img{border:1px solid #ddd;max-width:520px;height:auto}</style>",
+        "</head><body>",
+    ]
+    if phase_map_path is not None or phase_legend_path is not None:
+        body.append('<div class="figs">')
+        if phase_map_path is not None:
+            body.append(f'<figure><img src="{esc(phase_map_path.name)}" alt="phase map"><figcaption>Phase map</figcaption></figure>')
+        if phase_legend_path is not None:
+            body.append(f'<figure><img src="{esc(phase_legend_path.name)}" alt="phase legend"><figcaption>Legend</figcaption></figure>')
+        body.append("</div>")
+    body.append("<pre>")
+    body.append(esc(markdown))
+    body.append("</pre></body></html>")
+    return "\n".join(body)
+
+
+def _fmt_report_float(value: Any) -> str:
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _fmt_report_value(value: Any) -> str:
+    if value is None:
+        return "-"
+    return str(value)
+
+
 def _load_indexing_config(config: str | Path | dict[str, Any]) -> tuple[dict[str, Any], Path]:
     if isinstance(config, (str, Path)):
         path = Path(config).resolve()
@@ -494,6 +745,7 @@ def _generate_candidate_templates(
                 "projections": [m["projection"] for m in per_zone_metadata],
                 "per_zone_hkls": [m["hkls"] for m in per_zone_metadata],
                 "per_zone_qxy": [m["qxy"] for m in per_zone_metadata],
+                "per_zone_qnorm": [m["qnorm"] for m in per_zone_metadata],
                 "sig_shape": per_zone_metadata[0]["sig_shape"],
                 "beam_center_yx": per_zone_metadata[0]["beam_center_yx"],
                 "peak_sigma_px": per_zone_metadata[0]["peak_sigma_px"],
@@ -620,6 +872,7 @@ def _template_match_roi(
                 "stack": stack,
                 "all_scores": [float(s) for s in scores],
                 "orientations_deg": orientations,
+                "metadata": metadata,
             })
 
     if not all_hits:
@@ -854,18 +1107,7 @@ def _save_match_visuals(
 
         # Overlay: mean DP (gray) + explicit green template peaks.
         base = np.asarray(mean_dp, dtype=np.float32)
-        finite = base[np.isfinite(base)]
-        if finite.size > 0:
-            lo, hi = float(np.percentile(finite, 1)), float(np.percentile(finite, 99))
-            if hi <= lo:
-                hi = lo + 1.0
-            gray = np.clip(
-                (np.log1p(base) - np.log1p(lo)) / max(np.log1p(hi) - np.log1p(lo), 1e-12) * 255,
-                0, 255,
-            ).astype(np.uint8)
-        else:
-            gray = np.zeros(base.shape, dtype=np.uint8)
-        overlay = np.stack([gray, gray, gray], axis=-1).copy()
+        overlay = _gray_rgb(base)
         tmpl_norm = _scale_unit_interval(best_template)
         peak_mask = tmpl_norm >= 0.20
         green = (tmpl_norm * 255).astype(np.uint8)
@@ -873,6 +1115,22 @@ def _save_match_visuals(
         overlay[:, :, 1] = np.where(peak_mask, np.maximum(overlay[:, :, 1], green), overlay[:, :, 1])
         overlay[:, :, 2] = np.where(peak_mask, (overlay[:, :, 2] * 0.25).astype(np.uint8), overlay[:, :, 2])
         save_png(roi_dir / "template_match_overlay.png", overlay)
+
+        metadata = best.get("metadata")
+        if isinstance(metadata, dict):
+            _save_experimental_template_peak_overlay(
+                roi_dir / "experimental_template_peak_overlay.png",
+                roi={"name": roi_name, "bragg_summary_path": bragg_summary_path},
+                mean_dp=mean_dp,
+                template_metadata=metadata,
+                template_idx=int(best["template_idx"]),
+            )
+            _save_radial_q_profile_validation(
+                roi_dir / "radial_q_profile_validation.png",
+                mean_dp=mean_dp,
+                template_metadata=metadata,
+                template_idx=int(best["template_idx"]),
+            )
 
         # Correlation vs angle bar chart
         scores_arr = np.asarray(best["all_scores"], dtype=np.float32)
@@ -1060,6 +1318,357 @@ def _extract_cif_number(text: str, token: str) -> float | None:
     return None
 
 
+def _gray_rgb(image: np.ndarray) -> np.ndarray:
+    """Return a log-scaled grayscale RGB image for diffraction diagnostics."""
+    base = np.asarray(image, dtype=np.float32)
+    finite = base[np.isfinite(base)]
+    if finite.size == 0:
+        gray = np.zeros(base.shape, dtype=np.uint8)
+    else:
+        lo, hi = float(np.percentile(finite, 1)), float(np.percentile(finite, 99))
+        if hi <= lo:
+            hi = lo + 1.0
+        gray = np.clip(
+            (np.log1p(np.maximum(base, 0.0)) - np.log1p(max(lo, 0.0)))
+            / max(np.log1p(max(hi, 0.0)) - np.log1p(max(lo, 0.0)), 1e-12)
+            * 255.0,
+            0,
+            255,
+        ).astype(np.uint8)
+    return np.stack([gray, gray, gray], axis=-1).copy()
+
+
+def _draw_cross(
+    canvas: np.ndarray,
+    y: float,
+    x: float,
+    color: tuple[int, int, int],
+    *,
+    radius: int = 4,
+) -> None:
+    h, w = canvas.shape[:2]
+    cy, cx = int(round(y)), int(round(x))
+    if cy < 0 or cy >= h or cx < 0 or cx >= w:
+        return
+    y0, y1 = max(0, cy - radius), min(h, cy + radius + 1)
+    x0, x1 = max(0, cx - radius), min(w, cx + radius + 1)
+    canvas[y0:y1, cx] = color
+    canvas[cy, x0:x1] = color
+    if radius >= 3:
+        for d in range(-radius + 1, radius):
+            yy, xx = cy + d, cx + d
+            if 0 <= yy < h and 0 <= xx < w:
+                canvas[yy, xx] = color
+            yy, xx = cy + d, cx - d
+            if 0 <= yy < h and 0 <= xx < w:
+                canvas[yy, xx] = color
+
+
+def _draw_polyline_local(
+    canvas: np.ndarray,
+    points: np.ndarray,
+    color: tuple[int, int, int],
+) -> None:
+    pts = np.asarray(points, dtype=np.int32)
+    for p0, p1 in zip(pts[:-1], pts[1:]):
+        x0, y0 = int(p0[0]), int(p0[1])
+        x1, y1 = int(p1[0]), int(p1[1])
+        steps = max(abs(x1 - x0), abs(y1 - y0), 1)
+        xs = np.linspace(x0, x1, steps + 1).round().astype(int)
+        ys = np.linspace(y0, y1, steps + 1).round().astype(int)
+        valid = (ys >= 0) & (ys < canvas.shape[0]) & (xs >= 0) & (xs < canvas.shape[1])
+        canvas[ys[valid], xs[valid]] = color
+
+
+def _scale_points(
+    points_yx: np.ndarray,
+    src_shape: tuple[int, int],
+    dst_shape: tuple[int, int],
+) -> np.ndarray:
+    pts = np.asarray(points_yx, dtype=np.float64)
+    if pts.size == 0:
+        return pts.reshape(0, 2)
+    sy = float(dst_shape[0]) / max(float(src_shape[0]), 1.0)
+    sx = float(dst_shape[1]) / max(float(src_shape[1]), 1.0)
+    out = pts.copy()
+    out[:, 0] *= sy
+    out[:, 1] *= sx
+    return out
+
+
+def _load_measured_peak_positions_for_display(
+    roi: dict[str, Any],
+    mean_dp: np.ndarray,
+) -> np.ndarray:
+    bvm_path = roi.get("bragg_vector_map_path")
+    if not bvm_path and roi.get("bragg_summary_path"):
+        candidate = Path(str(roi["bragg_summary_path"])).parent / "bragg_vector_map.npy"
+        if candidate.is_file():
+            bvm_path = str(candidate)
+    if bvm_path:
+        try:
+            vmap = np.load(bvm_path)
+            peaks = _extract_measured_peak_positions(vmap, min_spacing=2)
+            return _scale_points(peaks, tuple(vmap.shape), tuple(mean_dp.shape))
+        except (OSError, ValueError):
+            pass
+
+    arr = np.asarray(mean_dp, dtype=np.float64)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return np.zeros((0, 2), dtype=np.float64)
+    threshold = max(float(np.percentile(finite, 99.5)), 0.20 * float(np.max(finite)))
+    return _extract_measured_peak_positions(arr, min_intensity=threshold, min_spacing=2).astype(np.float64)
+
+
+def _peak_match_assignments(
+    template_peaks: np.ndarray,
+    measured_peaks: np.ndarray,
+    tolerance_px: float,
+) -> dict[str, Any]:
+    n_template = len(template_peaks)
+    n_measured = len(measured_peaks)
+    empty = {
+        "matched_peak_count": 0,
+        "mean_q_residual": None,
+        "mean_angle_residual": None,
+        "matched_template_fraction": 0.0,
+        "unexplained_experiment_fraction": 1.0 if n_measured > 0 else 0.0,
+        "matched_template_indices": [],
+        "matched_measured_indices": [],
+        "unmatched_template_indices": list(range(n_template)),
+        "unmatched_measured_indices": list(range(n_measured)),
+        "matched_distances": [],
+    }
+    if n_template == 0 or n_measured == 0:
+        return empty
+
+    from scipy.spatial import cKDTree
+    tree = cKDTree(measured_peaks.astype(np.float64))
+    distances, indices = tree.query(template_peaks.astype(np.float64), distance_upper_bound=tolerance_px)
+    candidate_mask = np.isfinite(distances)
+
+    matched_template: list[int] = []
+    matched_measured: list[int] = []
+    matched_distances: list[float] = []
+    matched_angles: list[float] = []
+    used_measured: set[int] = set()
+
+    order = np.argsort(np.where(candidate_mask, distances, np.inf))
+    template_center = np.asarray(template_peaks, dtype=np.float64).mean(axis=0)
+    measured_center = np.asarray(measured_peaks, dtype=np.float64).mean(axis=0)
+    for template_idx in order:
+        if not candidate_mask[template_idx]:
+            continue
+        measured_idx = int(indices[template_idx])
+        if measured_idx in used_measured:
+            continue
+        used_measured.add(measured_idx)
+        matched_template.append(int(template_idx))
+        matched_measured.append(measured_idx)
+        matched_distances.append(float(distances[template_idx]))
+        t_angle = math.atan2(
+            float(template_peaks[template_idx, 0] - template_center[0]),
+            float(template_peaks[template_idx, 1] - template_center[1]),
+        )
+        m_angle = math.atan2(
+            float(measured_peaks[measured_idx, 0] - measured_center[0]),
+            float(measured_peaks[measured_idx, 1] - measured_center[1]),
+        )
+        angle_diff = abs(t_angle - m_angle)
+        matched_angles.append(float(min(angle_diff, 2 * math.pi - angle_diff)))
+
+    matched_template_set = set(matched_template)
+    matched_measured_set = set(matched_measured)
+    n_matched = len(matched_template)
+    return {
+        "matched_peak_count": n_matched,
+        "mean_q_residual": round(float(np.mean(matched_distances)), 3) if n_matched else None,
+        "mean_angle_residual": round(float(np.mean(matched_angles)), 4) if n_matched else None,
+        "matched_template_fraction": round(n_matched / max(n_template, 1), 4),
+        "unexplained_experiment_fraction": round((n_measured - n_matched) / max(n_measured, 1), 4),
+        "matched_template_indices": matched_template,
+        "matched_measured_indices": matched_measured,
+        "unmatched_template_indices": [i for i in range(n_template) if i not in matched_template_set],
+        "unmatched_measured_indices": [i for i in range(n_measured) if i not in matched_measured_set],
+        "matched_distances": matched_distances,
+    }
+
+
+def _template_peak_tolerance_px(
+    template_metadata: dict[str, Any],
+    src_shape: tuple[int, int],
+    dst_shape: tuple[int, int],
+) -> float:
+    sigma_px = float(template_metadata.get("peak_sigma_px", 5.0))
+    scale = min(float(dst_shape[0]) / max(float(src_shape[0]), 1.0), float(dst_shape[1]) / max(float(src_shape[1]), 1.0))
+    return max(1.5, round(2.5 * sigma_px * scale, 1))
+
+
+def _save_experimental_template_peak_overlay(
+    path: Path,
+    *,
+    roi: dict[str, Any],
+    mean_dp: np.ndarray,
+    template_metadata: dict[str, Any],
+    template_idx: int,
+) -> None:
+    template_peaks = _reconstruct_template_peak_positions(template_metadata, template_idx)
+    if template_peaks is None:
+        return
+    dst_shape = tuple(int(v) for v in mean_dp.shape)
+    src_shape = tuple(int(v) for v in template_metadata.get("sig_shape", dst_shape))
+    template_display = _scale_points(template_peaks, src_shape, dst_shape)
+    measured = _load_measured_peak_positions_for_display(roi, mean_dp)
+    tol = _template_peak_tolerance_px(template_metadata, src_shape, dst_shape)
+    assignments = _peak_match_assignments(template_display, measured, tol)
+
+    canvas = _gray_rgb(mean_dp)
+    for idx in assignments["unmatched_template_indices"]:
+        _draw_cross(canvas, template_display[idx, 0], template_display[idx, 1], (30, 120, 255), radius=4)
+    for idx in assignments["unmatched_measured_indices"]:
+        _draw_cross(canvas, measured[idx, 0], measured[idx, 1], (255, 40, 40), radius=4)
+    for idx in assignments["matched_measured_indices"]:
+        _draw_cross(canvas, measured[idx, 0], measured[idx, 1], (20, 230, 80), radius=5)
+    save_png(path, canvas)
+
+
+def _radial_profile(image: np.ndarray, center_yx: tuple[float, float] | None = None) -> tuple[np.ndarray, np.ndarray]:
+    arr = np.asarray(image, dtype=np.float64)
+    h, w = arr.shape
+    cy, cx = center_yx if center_yx is not None else ((h - 1) / 2.0, (w - 1) / 2.0)
+    yy, xx = np.indices(arr.shape)
+    radii = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    bins = np.floor(radii).astype(np.int32)
+    max_bin = int(bins.max())
+    sums = np.bincount(bins.ravel(), weights=np.nan_to_num(arr, nan=0.0).ravel(), minlength=max_bin + 1)
+    counts = np.bincount(bins.ravel(), minlength=max_bin + 1)
+    profile = sums / np.maximum(counts, 1)
+    return np.arange(max_bin + 1, dtype=np.float64), profile.astype(np.float64)
+
+
+def _radial_local_maxima(profile: np.ndarray) -> np.ndarray:
+    y = np.asarray(profile, dtype=np.float64)
+    if y.size < 3:
+        return np.zeros((0,), dtype=np.int64)
+    finite = y[np.isfinite(y)]
+    if finite.size == 0:
+        return np.zeros((0,), dtype=np.int64)
+    threshold = max(float(np.percentile(finite, 80)), 0.10 * float(np.max(finite)))
+    mask = (y[1:-1] >= y[:-2]) & (y[1:-1] >= y[2:]) & (y[1:-1] > threshold)
+    return np.nonzero(mask)[0].astype(np.int64) + 1
+
+
+def _expected_template_radii_px(
+    template_metadata: dict[str, Any],
+    template_idx: int,
+    max_radius_px: float,
+) -> np.ndarray:
+    orientations = template_metadata.get("orientations_deg", [])
+    zone_axis_index = template_metadata.get("zone_axis_index", [0] * len(orientations))
+    zi = int(zone_axis_index[template_idx]) if template_idx < len(zone_axis_index) else 0
+    qnorms = template_metadata.get("per_zone_qnorm")
+    if qnorms is not None and zi < len(qnorms):
+        q = np.asarray(qnorms[zi], dtype=np.float64)
+    elif template_metadata.get("per_zone_qxy") is not None and zi < len(template_metadata["per_zone_qxy"]):
+        qxy = np.asarray(template_metadata["per_zone_qxy"][zi], dtype=np.float64)
+        q = np.linalg.norm(qxy, axis=1)
+    elif template_metadata.get("qxy") is not None:
+        qxy = np.asarray(template_metadata["qxy"], dtype=np.float64)
+        q = np.linalg.norm(qxy, axis=1)
+    else:
+        return np.zeros((0,), dtype=np.float64)
+    scale = float(template_metadata.get("reciprocal_pixels_per_inv_angstrom", 1.0))
+    radii = q * scale
+    radii = radii[(radii > 1.0) & (radii < max_radius_px)]
+    if radii.size == 0:
+        return radii
+    return _cluster_radii(radii, min_separation_px=3.0)
+
+
+def _cluster_radii(radii: np.ndarray, *, min_separation_px: float) -> np.ndarray:
+    values = np.sort(np.asarray(radii, dtype=np.float64))
+    if values.size == 0:
+        return values
+    clusters: list[list[float]] = [[float(values[0])]]
+    for value in values[1:]:
+        if float(value) - clusters[-1][-1] <= min_separation_px:
+            clusters[-1].append(float(value))
+        else:
+            clusters.append([float(value)])
+    return np.asarray([float(np.mean(cluster)) for cluster in clusters], dtype=np.float64)
+
+
+def _save_radial_q_profile_validation(
+    path: Path,
+    *,
+    mean_dp: np.ndarray,
+    template_metadata: dict[str, Any],
+    template_idx: int,
+) -> None:
+    src_shape = tuple(int(v) for v in template_metadata.get("sig_shape", mean_dp.shape))
+    dst_shape = tuple(int(v) for v in mean_dp.shape)
+    beam = template_metadata.get("beam_center_yx")
+    if beam is not None:
+        center = (
+            float(beam[0]) * dst_shape[0] / max(float(src_shape[0]), 1.0),
+            float(beam[1]) * dst_shape[1] / max(float(src_shape[1]), 1.0),
+        )
+    else:
+        center = None
+    radii, profile = _radial_profile(mean_dp, center)
+    finite = profile[np.isfinite(profile)]
+    if finite.size == 0:
+        return
+    norm = profile - float(np.min(finite))
+    denom = float(np.max(norm)) if float(np.max(norm)) > 0 else 1.0
+    norm = np.clip(norm / denom, 0, 1)
+
+    canvas = np.full((420, 760, 3), 255, dtype=np.uint8)
+    margin_l, margin_r, margin_t, margin_b = 58, 28, 26, 48
+    x0, x1 = margin_l, canvas.shape[1] - margin_r - 1
+    y0, y1 = margin_t, canvas.shape[0] - margin_b - 1
+    canvas[y0:y1 + 1, x0] = 35
+    canvas[y1, x0:x1 + 1] = 35
+    for frac in (0.25, 0.5, 0.75):
+        gy = int(y1 - frac * (y1 - y0))
+        canvas[gy, x0:x1 + 1] = 228
+
+    px = (x0 + (radii / max(float(radii[-1]), 1.0)) * (x1 - x0)).astype(int)
+    py = (y1 - norm * (y1 - y0)).astype(int)
+    _draw_polyline_local(canvas, np.column_stack([px, py]), (25, 25, 25))
+
+    radius_scale = min(
+        float(dst_shape[0]) / max(float(src_shape[0]), 1.0),
+        float(dst_shape[1]) / max(float(src_shape[1]), 1.0),
+    )
+    exp_peaks = radii[_radial_local_maxima(norm)]
+    expected = _expected_template_radii_px(
+        template_metadata,
+        template_idx,
+        float(radii[-1]) / max(radius_scale, 1e-12),
+    )
+    expected = expected * radius_scale
+    expected = expected[(expected > 1.0) & (expected < float(radii[-1]))]
+    expected = _cluster_radii(expected, min_separation_px=3.0)
+    tol = max(2.0, float(template_metadata.get("peak_sigma_px", 5.0)))
+    matched_expected: set[float] = set()
+    for er in expected:
+        if exp_peaks.size and float(np.min(np.abs(exp_peaks - er))) <= tol:
+            matched_expected.add(float(er))
+
+    for er in expected:
+        x = int(x0 + er / max(float(radii[-1]), 1.0) * (x1 - x0))
+        color = (20, 170, 80) if float(er) in matched_expected else (30, 120, 255)
+        canvas[y0:y1 + 1, max(x - 1, x0):min(x + 2, x1 + 1)] = color
+    for rr in exp_peaks:
+        if expected.size == 0 or float(np.min(np.abs(expected - rr))) > tol:
+            x = int(x0 + rr / max(float(radii[-1]), 1.0) * (x1 - x0))
+            canvas[y0:y1 + 1, max(x - 1, x0):min(x + 2, x1 + 1)] = (255, 60, 60)
+
+    save_png(path, canvas)
+
+
 def _apply_extinctions(
     hkls: np.ndarray,
     space_group: int | None,
@@ -1206,6 +1815,7 @@ def _generate_kinematic_template_stack(
         "hkl_count": int(len(hkls)),
         "hkls": hkls.tolist(),
         "qxy": qxy.tolist(),
+        "qnorm": qnorm.tolist(),
         "orientations_deg": orientations_deg,
         "zone_axis": list(zone_axis),
         "projection": projection,
@@ -1361,61 +1971,13 @@ def _match_peaks_residual(
     mean_angle_residual (rad), matched_template_fraction,
     unexplained_experiment_fraction.
     """
-    n_template = len(template_peaks)
-    n_measured = len(measured_peaks)
-
-    if n_template == 0 or n_measured == 0:
-        return {
-            "matched_peak_count": 0,
-            "mean_q_residual": None,
-            "mean_angle_residual": None,
-            "matched_template_fraction": 0.0,
-            "unexplained_experiment_fraction": 1.0 if n_measured > 0 else 0.0,
-        }
-
-    # Compute all-pairs distances
-    from scipy.spatial import cKDTree
-    tree = cKDTree(measured_peaks.astype(np.float64))
-    distances, indices = tree.query(template_peaks, distance_upper_bound=tolerance_px)
-
-    matched_mask = np.isfinite(distances)
-    matched_measured = set()
-    matched_distances: list[float] = []
-    matched_angles: list[float] = []
-
-    # Greedy assignment: sort by distance, assign closest first
-    order = np.argsort(np.where(matched_mask, distances, np.inf))
-    for i in order:
-        if not matched_mask[i]:
-            continue
-        meas_idx = indices[i]
-        if meas_idx in matched_measured:
-            continue
-        matched_measured.add(meas_idx)
-        matched_distances.append(float(distances[i]))
-        # Angular residual
-        dy = template_peaks[i, 0] - measured_peaks[meas_idx, 0]
-        dx = template_peaks[i, 1] - measured_peaks[meas_idx, 1]
-        # Angle relative to the template peak azimuth
-        t_angle = np.arctan2(
-            template_peaks[i, 0] - template_peaks[:, 0].mean(),
-            template_peaks[i, 1] - template_peaks[:, 1].mean(),
-        )
-        m_angle = np.arctan2(
-            measured_peaks[meas_idx, 0] - measured_peaks[:, 0].mean(),
-            measured_peaks[meas_idx, 1] - measured_peaks[:, 1].mean(),
-        )
-        angle_diff = abs(t_angle - m_angle)
-        angle_diff = min(angle_diff, 2 * np.pi - angle_diff)
-        matched_angles.append(float(angle_diff))
-
-    n_matched = len(matched_distances)
+    assignments = _peak_match_assignments(template_peaks, measured_peaks, tolerance_px)
     return {
-        "matched_peak_count": n_matched,
-        "mean_q_residual": round(float(np.mean(matched_distances)), 3) if n_matched else None,
-        "mean_angle_residual": round(float(np.mean(matched_angles)), 4) if n_matched else None,
-        "matched_template_fraction": round(n_matched / n_template, 4),
-        "unexplained_experiment_fraction": round((n_measured - n_matched) / max(n_measured, 1), 4),
+        "matched_peak_count": assignments["matched_peak_count"],
+        "mean_q_residual": assignments["mean_q_residual"],
+        "mean_angle_residual": assignments["mean_angle_residual"],
+        "matched_template_fraction": assignments["matched_template_fraction"],
+        "unexplained_experiment_fraction": assignments["unexplained_experiment_fraction"],
     }
 
 

@@ -1,34 +1,48 @@
 # large-4dstem-analysis
 
 End-to-end 4D-STEM analysis pipeline for large datasets: from raw data loading
-through unsupervised fingerprint-class screening to crystallographic phase
-assignment.  Three-stage design with validated data contracts between stages.
+through unsupervised fingerprint-class screening to **evidence-based
+crystallographic phase validation with ambiguity detection**.
 
-> **Terminology:** Stage 1 produces *unsupervised diffraction fingerprint classes* —
-> not crystallographic phase assignments.  Radial profiles can separate thickness,
-> orientation, strain, amorphous/crystalline contrast, detector artifacts, and
-> phase changes.  A cluster is a contrast group; only Stage 2B assigns
-> crystallographic phase candidates.
+> **Design principle:** If the diffraction evidence is insufficient to
+> distinguish phases, the pipeline reports `AMBIGUOUS / LOW_CONFIDENCE`
+> rather than forcing a phase label.  Correlation scores, peak-position
+> residuals, and negative controls all feed a hybrid validation score;
+> near-degenerate impostors (e.g. TiO₂-rutile with Ti-hcp) are caught
+> and reported openly.
 
 **What you get:**
 - **Stage 1** — Virtual images (BF/ADF/HAADF/COM/rings), radial fingerprints,
   unsupervised fingerprint classes, orientation preview, sample mask, ROI
   candidates, QC diagnostics (10 checks), markdown + HTML report (~40 PNGs).
 - **Stage 2A** — Per-ROI py4DSTEM Bragg disk detection with beam-centre
-  calibration cascade, cluster/background validation, Bragg QC metrics,
-  tabular peak output (Parquet), and a report labelling which ROIs are
-  ready for indexing.
-- **Stage 2B** — CIF→kinematic template generation, multi-zone-axis orientation
-  sweep, normalized correlation matching, phase confidence tiering,
-  EBSD-style phase match map, and an interactive PNG gallery.
+  calibration cascade, central-exclusion peak filtering, cluster/background
+  validation, Bragg QC metrics, tabular peak output (Parquet), and a report
+  labelling which ROIs are ready for indexing.
+- **Stage 2B (v3)** — CIF→kinematic template generation with space-group
+  extinction filtering, multi-zone-axis orientation sweep, physical reciprocal
+  calibration, **peak-position residual analysis**, **hybrid validation
+  scoring** (correlation + matched-observable fraction + q-residual),
+  **ambiguity detection** (reports `AMBIGUOUS` when evidence is degenerate),
+  negative-control CIF validation, 4-tier confidence reporting
+  (`HIGH_CONFIDENCE` / `MEDIUM_CONFIDENCE` / `LOW_CONFIDENCE` / `UNINDEXED`),
+  score-sign QC check, experimental-template peak overlays, radial q-profile
+  validation, parameter stability sweep, EBSD-style phase match map, and an
+  interactive PNG gallery.
 
-**Real-data verification** (Ti, 512×512×256×256 detector, 34 GB MIB):
+**Real-data verification** (Ti, 512×512×256×256 detector, 34 GB MIB, `bin_q=2`):
 
 | Stage | Output | Result |
 |-------|--------|--------|
 | 1 | Fingerprint classes | 4 clusters on 256×256 nav (`r_bin=2`) |
-| 2A | Bragg detection | 6,750 peaks in `cluster0_core_01`, QC PASS |
-| 2B | Template matching | Ti-hcp / Ti-bcc candidates, scores −0.03 to −0.07 (low), phase confidence: low |
+| 2A | Bragg detection | 75,080 total peaks across 11 ROIs (`minRelativeIntensity=0.10`, central exclusion), QC PASS |
+| 2B (v3) | Phase validation | **11/11 ROIs `AMBIGUOUS / LOW_CONFIDENCE`** — Ti-hcp vs TiO₂-rutile near-degenerate at `bin_q=2`; pipeline correctly refuses to force a phase label |
+
+> **Current status (v3):** `Stage 2B-v3` is an ambiguity-aware, evidence-based
+> candidate phase reporter — not a confirmed phase mapper.  The limiting factor
+> is diffraction evidence at `bin_q=2` (128×128 effective detector), not the
+> algorithm.  See the [Real-Data Results](#real-data-results-ti-34-gb-mib)
+> section for the full pipeline evolution and interpretation guidance.
 
 ---
 
@@ -178,46 +192,76 @@ python -m fourdstem_pipeline.cli stage2 --config configs/stage2_roi_bragg.yaml
 
 ---
 
-### Stage 2B — Crystallographic Indexing
+### Stage 2B — Crystallographic Indexing (v3)
 
 ```bash
 python -m fourdstem_pipeline.cli stage2b --config configs/stage2_indexing.yaml
+# Parameter stability sweep (v3):
+python scripts/run_stage2b_sweep.py --config configs/stage2_indexing.yaml
 ```
 
 **What it does:**
 1. Filters ROIs via `is_roi_ready_for_indexing()` (peaks>0, bg≤50%,
    sample coverage>0, beam calibrated)
-2. Parses CIF files for lattice parameters (`_cell_length_*`, `_cell_angle_*`)
+2. Parses CIF files for lattice parameters and space group
 3. Generates kinematic template stacks from the reciprocal lattice:
-   - Multi-zone-axis orthographic projection
+   - Multi-zone-axis orthographic projection (5 axes: [001], [100], [110], [111], [112])
    - In-plane orientation sweep (`orientation_step_deg`)
+   - Space-group extinction filtering (P6₃/mmc, Im-3m, Fm-3m, Fd-3m, R-3m, P4₂/mnm)
    - Gaussian spot rendering (`peak_sigma_px` controls CBED disk width)
    - Intensity ≈ 1/|q|^power kinematic proxy
-4. Matches ROI patterns against templates via normalized correlation,
-   reporting best (candidate, zone axis, orientation) triplet
-5. Computes phase confidence (high/medium/low) from best score and
-   its margin over the second-best **competing** candidate
-6. Renders an **EBSD-style phase match map** — navigation-space overview
-   with ROIs coloured by matched phase, boundaries, and legend
-7. Saves per-ROI match PNGs: best template, template+data overlay,
-   correlation-vs-angle chart
-8. Updates `stage2_gallery.html` with a Global Overview section
+   - Physical reciprocal calibration (`reciprocal_pixels_per_inv_angstrom`)
+4. Matches ROI mean DPs against templates via normalized correlation,
+   reporting best (candidate, zone axis, orientation) triplet per candidate
+5. **Peak-position residual analysis** — reconstructs template peak
+   coordinates from hkl/qxy metadata, extracts measured peaks from the
+   Bragg vector map via local-maximum detection, performs greedy
+   closest-pair matching with cKDTree
+6. **Hybrid validation scoring** — combines correlation (35%) +
+   matched-observable template fraction (40%) + q-residual (15%) +
+   unexplained experimental fraction (10%)
+7. **Ambiguity detection** — reports `AMBIGUOUS` when hybrid scores of
+   competing candidates are within 0.08 and matched fractions are < 20%,
+   or when the correlation winner differs from the peak-matching winner
+8. **Negative-control validation** — scores all candidates (including
+   wrong-CIF controls: TiO₂-rutile, Ni-fcc, Al-fcc, Fe-bcc, Ti-hcp-wrong-a)
+   and checks that the best candidate meaningfully outperforms them
+9. **4-tier confidence:** `HIGH_CONFIDENCE` / `MEDIUM_CONFIDENCE` /
+   `LOW_CONFIDENCE` / `UNINDEXED` — incorporates peak-matching evidence
+   in addition to correlation score and margin
+10. **Score-sign QC check** — emits `FAIL` when all template correlations
+    are negative (anti-correlation with data)
+11. **Experimental-template peak overlay** per ROI: mean diffraction pattern
+    with matched experimental peaks in green, unexplained experimental peaks
+    in red, and unmatched template peaks in blue. This is the primary
+    diagnostic for q calibration, template orientation, peak detection, or
+    wrong-candidate failures.
+12. **Radial q-profile validation** per ROI before 2D orientation matching:
+    radial integration of the experimental DP with expected candidate/template
+    q-bands, so basic d-spacing support can be checked first.
+13. Renders an **EBSD-style phase match map** with ambiguous regions shown
+    as distinct candidate-group labels (e.g. "Ti-hcp / TiO₂-rutile")
+14. Updates `stage2_gallery.html` with a Global Overview section and the
+    per-ROI diagnostic overlays
 
-**Key outputs:**
+**Key outputs (v3 schema):**
 
 | File | Content |
 |------|---------|
-| `stage2_indexing_summary.json` | Phase, score, zone axis, orientation, confidence (schema v2) |
-| `phase_match_map.png` | EBSD-style nav-space phase overview with legend |
-| `templates/<candidate>_template_stack.npy` | Full orientation template stack (float32) |
-| `templates/<candidate>_template_metadata.json` | Cell, HKL list, projection, beam centre |
+| `stage2_indexing_summary.json` | Phase call, candidate group, hybrid score, peak residuals, confidence tier, score-sign QC (schema v3) |
+| `phase_match_map.png` | EBSD-style phase overview — ambiguous ROIs shown as candidate-group labels |
+| `sweep_summary.json` | (from sweep script) Stability matrix across parameter grid |
+| `templates/<candidate>_template_stack.npy` | Full orientation template stack (float32), per-zone hkls/qxy persisted |
+| `templates/<candidate>_template_metadata.json` | Cell, HKLs, qxy coords, projections, beam centre, extinction stats |
 | `roi_<name>/template_best_match.png` | Best-matching kinematic template |
 | `roi_<name>/template_match_overlay.png` | Mean DP + template peaks (green) |
+| `roi_<name>/experimental_template_peak_overlay.png` | Mean DP diagnostic: green=matched experimental peaks, red=unexplained experimental peaks, blue=unmatched template peaks |
+| `roi_<name>/radial_q_profile_validation.png` | 1D radial q-profile validation against expected template q-bands before 2D orientation matching |
 | `roi_<name>/correlation_vs_angle.png` | Correlation vs. in-plane angle |
 
-**Key parameters:** `max_index`, `zone_axes` (multi-zone) / `zone_axis`
-(single-zone backward compat), `orientation_step_deg`, `peak_sigma_px`,
-`reciprocal_pixels_per_inv_angstrom` (null = auto-fit), `intensity_power`
+**Key parameters:** `max_index`, `zone_axes`, `orientation_step_deg`,
+`peak_sigma_px`, `reciprocal_pixels_per_inv_angstrom`, `intensity_power`,
+`space_group` (per-candidate override for extinction rules)
 
 ---
 
@@ -229,6 +273,7 @@ python -m fourdstem_pipeline.cli stage2b --config configs/stage2_indexing.yaml
 | `fourdstem-dry-run` | `python -m fourdstem_pipeline.cli dry_run` | Pre-flight config validation |
 | `fourdstem-stage2` | `python -m fourdstem_pipeline.cli stage2` | Stage 2A ROI Bragg detection |
 | `fourdstem-stage2b` | `python -m fourdstem_pipeline.cli stage2b` | Stage 2B crystallographic indexing |
+| `fourdstem-stage2b-sweep` | `python scripts/run_stage2b_sweep.py` | Parameter stability sweep (v3) |
 
 All accept `--config <path>` and `--log-level DEBUG|INFO|WARNING|ERROR`.
 
@@ -312,42 +357,66 @@ mem: MEMMAP
 corr_power: 1.0
 sigma_cc: 1
 edge_boundary: 10
-min_relative_intensity: 0.05
+min_relative_intensity: 0.10      # 0.10–0.15 recommended (0.05 admits central-beam tails)
 min_peak_spacing: 4
 subpixel: poly
 max_num_peaks: 70
 cuda: false
 
-save_roi_data: false              # Set true for full-DP template matching
+central_exclusion_radius: 30      # zero vmap within 30 px (binned) of beam centre
+save_roi_data: true               # required for full mean-DP template matching
 ```
 
-### Stage 2B (`configs/stage2_indexing.yaml`)
+### Stage 2B (`configs/stage2_indexing.yaml`) — v3
 
 ```yaml
 stage2_dir: outputs/my_run/stage2/roi_bragg
-output_dir: null                  # null = <stage2_dir>/stage2b_indexing/
+output_dir: null
 
 template_generation:
   max_index: 4
-  zone_axis: [0, 0, 1]           # backward compat
-  # zone_axes:                   # multi-zone mode (uncomment to enable)
-  #   - [0, 0, 1]
-  #   - [1, 0, 0]
-  #   - [1, 1, 0]
-  #   - [1, 1, 1]
-  #   - [1, 1, 2]
+  zone_axes:                       # multi-zone-axis mode
+    - [0, 0, 1]
+    - [1, 0, 0]
+    - [1, 1, 0]
+    - [1, 1, 1]
+    - [1, 1, 2]
   orientation_step_deg: 5
   peak_sigma_px: 5.0
-  reciprocal_pixels_per_inv_angstrom: null   # null = auto-fit to detector
+  # Physical calibration (200 kV, L=91 mm, pixel ~6.5 um):
+  reciprocal_pixels_per_inv_angstrom: 55.9
   intensity_power: 2.0
 
 candidate_cifs:
-  - name: Ti-bcc
-    phase: Ti-bcc
-    path: data/0617-4d/Ti-bcc.cif
-  - name: Ti-hcp
+  - name: Ti_hcp
     phase: Ti-hcp
     path: data/0617-4d/Ti-hcp.cif
+    space_group: 194               # P6_3/mmc — overrides CIF P1 for extinctions
+  - name: Ti_bcc
+    phase: Ti-bcc
+    path: data/0617-4d/Ti-bcc.cif
+    space_group: 229               # Im-3m
+  # --- Negative controls (P0 validation) ---
+  - name: TiO2_rutile
+    phase: TiO2-rutile
+    path: data/0617-4d/TiO2_rutile.cif
+    space_group: 136
+  - name: Ni_fcc
+    phase: Ni-fcc
+    path: data/0617-4d/Ni_fcc.cif
+    space_group: 225
+  - name: Al_fcc
+    phase: Al-fcc
+    path: data/0617-4d/Al_fcc.cif
+    space_group: 225
+  - name: Fe_bcc
+    phase: Fe-bcc
+    path: data/0617-4d/Fe_bcc.cif
+    space_group: 229
+  - name: Ti_hcp_wrong_a
+    phase: Ti-hcp-wrong
+    path: data/0617-4d/Ti_hcp_wrong_a.cif
+    space_group: 194
 ```
 
 ---
@@ -389,15 +458,19 @@ outputs/<run>/
 │       ├── bragg_peak_radius_histogram.png
 │       ├── template_best_match.png  # (from Stage 2B)
 │       ├── template_match_overlay.png
+│       ├── experimental_template_peak_overlay.png  # Stage 2B matched/unexplained/unmatched peak diagnostic
+│       ├── radial_q_profile_validation.png         # Stage 2B 1D q-profile validation
 │       └── correlation_vs_angle.png
 │
-│   └── stage2b_indexing/            # ── Stage 2B ──
-│       ├── stage2_indexing_summary.json
-│       ├── phase_match_map.png      # EBSD-style phase overview
-│       ├── phase_match_legend.png   # Phase legend
+│   └── stage2b_indexing/            # ── Stage 2B v3 ──
+│       ├── stage2_indexing_summary.json   # Phase call, hybrid score, peak residuals, confidence
+│       ├── phase_match_map.png           # EBSD-style phase overview (ambiguous = candidate-group labels)
+│       ├── phase_match_legend.png        # Phase + ambiguous-group legend
+│       ├── stage2b_sweep/                # (from sweep script)
+│       │   └── sweep_summary.json        # Stability matrix across parameter grid
 │       └── templates/
-│           ├── <candidate>_template_stack.npy
-│           └── <candidate>_template_metadata.json
+│           ├── <candidate>_template_stack.npy     # Template stack (per-zone hkls/qxy persisted)
+│           └── <candidate>_template_metadata.json # Cell, HKLs, qxy, extinctions, space group
 ```
 
 ---
@@ -429,81 +502,106 @@ All stages follow a unified contract (`data_contract.json`):
 | `0617_4d_workflow_rbin1.yaml` | Ti: full 512×512 nav |
 | `0617_4d_workflow_rbin2.yaml` | Ti: 256×256 nav |
 | `0617_4d_stage1_enhanced.yaml` | Ti: enhanced QC + fingerprint-class screening |
-| `stage2_roi_bragg.yaml` | Stage 2A Bragg detection |
+| `stage2_roi_bragg.yaml` | Stage 2A Bragg detection (`save_roi_data: true`, `minRelativeIntensity: 0.10`, central exclusion) |
 | `stage2_smoke_test.yaml` | Stage 2A smoke test (`max_rois: 1`) |
-| `stage2_indexing.yaml` | Stage 2B indexing with Ti CIF candidates |
+| `stage2_indexing.yaml` | Stage 2B v3 indexing (7 CIFs, 5 zone axes, physical calibration, space-group extinctions) |
 
 ---
 
 ## Real-Data Results (Ti, 34 GB MIB)
 
 ```
-Data:     512×512 scan × 256×256 detector, 0.75 mrad, 26,000× mag
+Data:     512×512 scan × 256×256 detector, 0.75 mrad, 26,000× mag, CL 91 mm
 Config:   0617_4d_stage1_enhanced.yaml (r_bin=2, q_crop=[16,240,16,240], q_bin=2)
+Stage 2A: stage2_roi_bragg.yaml (thin_r=2, bin_q=2, minRelativeIntensity=0.10, central_exclusion_radius=30, save_roi_data=true)
+Stage 2B: stage2_indexing.yaml (7 candidates, 5 zone axes, reciprocal scale 55.9 px/Å, space-group extinctions)
 ```
 
-| Stage | Metric | Value |
-|-------|--------|-------|
-| **1** | Fingerprint classes | 4 |
-| **1** | Navigation shape | 256×256 |
-| **1** | Signal shape (preprocessed) | 112×112 |
-| **1** | QC status | PASS_WITH_WARNINGS |
-| **1** | ROI candidates | 10 |
-| | | |
-| **2A** | ROIs processed | 10 |
-| **2A** | Bragg peaks (cluster0) | 6,750 |
-| **2A** | Beam centre source | `stage1_com` |
-| **2A** | Beam centre (raw) | `[126.8, 125.7]` |
-| **2A** | QC status | PASS |
-| **2A** | Elapsed | 10.7 s |
-| | | |
-| **2B** | Candidates | Ti-bcc (cubic, a=3.25 Å), Ti-hcp (hex, a=4.57 Å, c=2.83 Å) |
-| **2B** | Templates | 144 (72 per candidate, 5° step, [0,0,1] zone axis) |
-| **2B** | Match scores | −0.069 to −0.028 (low; *negative* — templates anti-correlated with data) |
-| **2B** | Score margins | 0.0004–0.007 (below random-noise floor of ~0.008 for 5 ROIs) |
-| **2B** | Phase confidence | low for all 11 ROIs (single zone axis, `save_roi_data: false`) |
-| **2B** | Phase distribution | 10/11 Ti-hcp, 1/11 Ti-bcc (not crystallographic proof; see caveats below) |
-| **2B** | Auto-scale | ~55–58 px/Å (auto-fit to detector radius; **no camera-length calibration**) |
-| **2B** | Elapsed | ~8 s |
+### Pipeline evolution across optimisation stages
 
-> **⚠️ Caveat:** These results are from `save_roi_data: false` (bragg-vector-map
-> fallback) with a single [001] zone axis and auto-fit reciprocal scale. Under
-> these conditions template matching produces **negative normalized correlations**
-> — the templates anti-correlate with the Bragg vector map because the map is
-> dominated by the central-beam falloff. Score margins between Ti-hcp and Ti-bcc
-> are smaller than the expected random-noise floor (σ ≈ 0.008), making the two
-> phases statistically indistinguishable. **Treat the phase map as a candidate
-> distribution for method development, not as crystallographic evidence.**
+| Metric | Initial (`save_roi_data=false`, single [001], auto-scale) | +mean DP +multi-zone +cal | +extinctions +cleanBragg | **v3: +hybrid +negative controls +ambiguity** |
+|--------|-----------------------------------------------------------|---------------------------|-------------------------|----------------------------------------------|
+| Match scores | −0.07 to −0.03 ❌ | +0.50 to +0.58 | +0.51 to +0.59 | +0.53 to +0.62 |
+| Score margins | 0.0004–0.007 | 0.042–0.177 | 0.086–0.177 | 0.020–0.076 |
+| ROIs medium+ | 0/11 | 6/11 | 11/11 | 0/11 |
+| Phase call | 10× Ti-hcp, 1× Ti-bcc | 11× Ti-hcp [100] | 11× Ti-hcp [100] | **11× AMBIGUOUS** |
+| Phase confidence | low | low–medium | medium | **LOW_CONFIDENCE** |
+| Negative controls | — | — | — | TiO₂-rutile wins correlation (0.54–0.62 vs Ti-hcp 0.53–0.54); Ti-hcp wins peak matching 3:1 |
+| Candidates | 2 | 2 | 2 | **7** (Ti-hcp, Ti-bcc, TiO₂-rutile, Ni-fcc, Al-fcc, Fe-bcc, Ti-hcp-wrong-a) |
+| Templates | 144 | 720 | 720 | **2,520** |
+| Zone axes | [001] only | 5 axes | 5 axes | 5 axes |
+| Bragg peaks | 90,638 | 90,638 | 75,080 | 75,080 |
+| Detector calibration | auto-fit | 55.9 px/Å (computed) | 55.9 px/Å | 55.9 px/Å |
+| Space-group extinctions | — | — | SG 194/229 | SG 136/194/225/229 |
+| Score-sign QC | — | — | — | PASS |
+| Schema version | v2 | v2 | v2 | **v3** |
+
+### Current v3 interpretation
+
+```text
+All 11 ROIs are crystallographically consistent with a Ti-hcp-like /
+TiO₂-rutile-like diffraction geometry, but the available 128×128 binned
+detector data (bin_q=2) are insufficient for confident phase separation.
+The pipeline therefore assigns AMBIGUOUS / LOW_CONFIDENCE rather than
+forcing a phase label.
+```
+
+**Why this is correct:** TiO₂-rutile (a=4.593 Å) has nearly the same `a`
+lattice parameter as Ti-hcp (a=4.567 Å).  On the [100] zone axis, the
+ring patterns are almost indistinguishable by dot-product correlation.
+TiO₂-rutile **wins correlation** (0.54–0.62) but Ti-hcp **wins peak
+matching** (60–69 matched peaks vs 19–25).  Neither reaches the 20%
+observable-template threshold at `bin_q=2`.  The hybrid validation score
+correctly identifies this as a degenerate case.
+
+**The pipeline catches three critical failure modes:**
+1. Correlation-only false positives (TiO₂ out-scores Ti-hcp)
+2. Near-degenerate wrong-CIF impostors (similar lattice parameters)
+3. Insufficient peak-level evidence (matched fraction < detection limit)
+
+### Recommended next steps for phase confirmation
+
+The algorithm is now honest.  The limiting factor is diffraction evidence:
+
+| Action | Expected impact |
+|--------|----------------|
+| `bin_q=1` | Full 256×256 detector resolution → more resolvable Bragg peaks |
+| Higher-q peak retention | More template peaks become observable |
+| Better beam-centre refinement | Lower q-residuals for matched peaks |
+| EDS/EELS oxygen check | Chemically rule out TiO₂ |
+| SAED/NBED on selected ROIs | Manual validation of candidate phases |
 
 ### Template matching notes
 
-`peak_sigma_px` controls Gaussian spot width — tune to match your convergence
-angle (3–6 px for typical CBED). With the default of 5.0 px and the
-bragg-vector-map fallback (`save_roi_data: false`), template correlations are
-negative and non-discriminative (scores −0.07 to −0.03, margins < 0.008). For
-physically meaningful matching:
+For physically meaningful template matching:
 
-1. **Set `save_roi_data: true`** in Stage 2A config for full mean-DP correlation.
-   This is the single most impactful change — matching against the actual mean
-   diffraction pattern instead of the Bragg vector map yields physically
-   meaningful (positive) correlation scores.
-2. **Set `reciprocal_pixels_per_inv_angstrom`** if camera length is calibrated
-   (e.g. CL91mm at this convergence angle). Without it, templates are
-   auto-scaled to the detector radius and ring positions have no physical basis.
-3. Enable multi-zone-axis mode (`zone_axes`) in Stage 2B config for
-   discriminative score margins between competing phases.
+1. **Set `save_roi_data: true`** in Stage 2A config. Matching against the actual
+   mean DP (vs bragg-vector-map fallback) is the single most impactful change.
+2. **Set `reciprocal_pixels_per_inv_angstrom`** from camera length (e.g.
+   55.9 px/Å for CL=91 mm, 200 kV, 6.5 μm pixels).
+3. **Enable `zone_axes`** (multi-zone-axis mode). Real grains are rarely
+   aligned to a single zone axis.
+4. **Add negative-control CIFs.** Wrong phases with similar lattice parameters
+   (e.g. TiO₂-rutile vs Ti-hcp) can produce comparable correlation scores.
+   Peak-residual analysis and hybrid validation catch these impostors.
+5. **Run the parameter stability sweep** (`scripts/run_stage2b_sweep.py`) to
+   verify that the phase call is stable across `peak_sigma_px`,
+   `orientation_step_deg`, and `reciprocal_pixels_per_inv_angstrom`.
+6. **Check `score_sign_qc`** in the summary — `FAIL` means all templates are
+   anti-correlated with the data (likely `save_roi_data: false` or wrong
+   zone axes).
 
 ---
 
 ## Package Structure
 
 ```
-src/fourdstem_pipeline/        # 28 modules
+src/fourdstem_pipeline/        # 27 modules
 ├── cli.py                     # CLI entry points (run, dry_run, stage2, stage2b)
 ├── workflow.py                # Stage 1 orchestration
 ├── stage2.py                  # Stage 2A orchestration
-├── roi_bragg.py               # py4DSTEM Bragg disk detection + QC
-├── indexing.py                # Stage 2B CIF→template→matching
+├── roi_bragg.py               # py4DSTEM Bragg disk detection + QC + central exclusion
+├── indexing.py                # Stage 2B v3: CIF→template→hybrid matching→ambiguity detection
 ├── export.py                  # PNG writer, reports, phase maps
 ├── export_stage2.py           # Stage 2A report, benchmark, gallery
 ├── contracts.py               # DataContract, Stage1Manifest, indexing gate
@@ -525,6 +623,9 @@ src/fourdstem_pipeline/        # 28 modules
 ├── masks.py                   # Annular detector mask generation
 ├── synthetic.py               # Synthetic 4D-STEM demo generator
 └── logging.py                 # Structured pipeline logging
+
+scripts/
+└── run_stage2b_sweep.py       # Parameter stability sweep for Stage 2B v3
 ```
 
 ---
@@ -539,7 +640,7 @@ src/fourdstem_pipeline/        # 28 modules
 | Stage 2A per-ROI | `bragg_summary.json` | Both bboxes, beam centre, peaks, validation |
 | Stage 2A aggregate | `stage2_summary.json` | All ROI results + provenance |
 | Stage 2A → 2B gate | `is_roi_ready_for_indexing()` | Shared filter: peaks>0, bg≤50%, sample>0, beam calibrated |
-| Stage 2B output | `stage2_indexing_summary.json` | Phase, score, zone axis, orientation, confidence (schema v2) |
+| Stage 2B output (v3) | `stage2_indexing_summary.json` | Phase call, candidate group, hybrid score, peak residuals, confidence tier, score-sign QC (schema v3) |
 
 ---
 
@@ -603,6 +704,29 @@ from `stage2_summary.json` parameters.
 3. Set `reciprocal_pixels_per_inv_angstrom` if camera length is known.
 4. Use `zone_axes` for multi-zone-axis coverage — real grains may not be
    aligned to `[0,0,1]`.
+
+### Stage 2B: all ROIs report AMBIGUOUS / LOW_CONFIDENCE
+
+This is **by design** when evidence is insufficient.  Check:
+- `roi_<name>/experimental_template_peak_overlay.png` first. Many red peaks
+  indicate experimental peaks the template cannot explain; many blue peaks
+  indicate expected template peaks not observed experimentally.
+- `roi_<name>/radial_q_profile_validation.png` before trusting 2D orientation
+  matching. If the 1D q-bands do not align with experimental radial peaks,
+  the candidate phase, reciprocal calibration, or peak extraction is suspect.
+- `score_sign_qc` in the summary — if `FAIL`, fix the root causes above first.
+- `matched_observable_template_fraction` — if < 0.20 for all candidates,
+  the detector resolution (bin_q) or reciprocal calibration may be limiting.
+- `candidate_group` — identifies which phases are near-degenerate.
+  Consider chemical validation (EDS/EELS) or higher-resolution data (bin_q=1).
+- Run `scripts/run_stage2b_sweep.py` to check parameter stability.
+
+### Stage 2B: score_sign_qc reports FAIL
+
+All template correlations are negative — templates are anti-correlated with
+the data.  The most common cause is matching against `bragg_vector_map.npy`
+instead of a mean DP.  Set `save_roi_data: true` in Stage 2A and re-run.
+Also check `reciprocal_pixels_per_inv_angstrom` and `zone_axes` settings.
 
 ### Binning truncation
 
