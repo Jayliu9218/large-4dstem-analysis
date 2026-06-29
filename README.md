@@ -291,6 +291,8 @@ python scripts/run_stage2b_sweep.py --config configs/stage2_indexing.yaml
 | `fourdstem-dry-run` | `python -m fourdstem_pipeline.cli dry_run` | Pre-flight config validation |
 | `fourdstem-stage2` | `python -m fourdstem_pipeline.cli stage2` | Stage 2A ROI Bragg detection |
 | `fourdstem-stage2b` | `python -m fourdstem_pipeline.cli stage2b` | Stage 2B crystallographic indexing |
+| `fourdstem-bin-export` | `python -m fourdstem_pipeline.cli bin-export` | Bin raw data (R_bin, Q_bin) → EMD/H5 |
+| `fourdstem-crop-export` | `python -m fourdstem_pipeline.cli crop-export` | Crop navigation dimensions → EMD/H5 |
 | `fourdstem-stage2b-sweep` | `python scripts/run_stage2b_sweep.py` | Parameter stability sweep (v3) |
 
 All accept `--config <path>` and `--log-level DEBUG|INFO|WARNING|ERROR`.
@@ -301,6 +303,54 @@ Without loading data, validates: config parse, input file existence/size,
 scan & detector shapes, estimated output shape/chunks/memory, writable
 output directory, unknown config keys, existing results. Use `--json`
 for machine-readable output.
+
+### `bin-export` — bin raw data and export to EMD/H5
+
+Load a large 4D-STEM dataset (MIB or H5/EMD), apply navigation and/or
+detector binning via py4DSTEM, and save the compressed result as a
+standards-compliant EMD 1.0 file.  Avoids re-importing and re-binning
+on every pipeline run.
+
+```powershell
+# MIB: R_bin=4 (512→128 nav), Q_bin=2 (256→128 detector)
+python -m fourdstem_pipeline.cli bin-export \
+    --input data/scan.mib --output data/binned.h5 \
+    --r-bin 4 --q-bin 2 --scan-shape 512 512
+
+# Already-binned H5: further Q_bin only
+python -m fourdstem_pipeline.cli bin-export \
+    --input data/binned.h5 --output data/binned_q2.h5 --q-bin 2
+```
+
+| Flag | Purpose |
+|------|---------|
+| `--input` | Raw data path (`.mib`, `.h5`, `.hdf5`, `.emd`) |
+| `--output` | Output path (`.h5` appended if no suffix) |
+| `--r-bin` | Navigation binning factor (default 1) |
+| `--q-bin` | Detector binning factor (default 1) |
+| `--mem` | py4DSTEM memory mode: `MEMMAP` (default) or `RAM` |
+| `--scan-shape` | Raw nav shape `ny nx` for MIB import |
+
+### `crop-export` — crop navigation and export to EMD/H5
+
+Load raw data, extract a rectangular sub-region from the navigation
+dimensions (detector unchanged), and export as EMD/H5.  Typical use:
+extract a 64×64 region from a 512×512 scan for fast screening.
+
+```powershell
+# 512×512×256×256 → 64×64×256×256 (detector unchanged)
+python -m fourdstem_pipeline.cli crop-export \
+    --input data/scan.mib --output data/cropped.h5 \
+    --nav-crop 0 64 0 64 --scan-shape 512 512
+```
+
+| Flag | Purpose |
+|------|---------|
+| `--input` | Raw data path |
+| `--output` | Output path |
+| `--nav-crop` | Crop region `y0 y1 x0 x1` in nav pixels (y1/x1 exclusive) |
+| `--mem` | py4DSTEM memory mode |
+| `--scan-shape` | Raw nav shape for MIB import |
 
 ---
 
@@ -636,6 +686,7 @@ src/fourdstem_pipeline/        # 27 modules
 ├── config.py                  # YAML loading, validation, defaults
 ├── loaders.py                 # Synthetic, NumPy/NPZ, HyperSpy/MIB backends
 ├── preprocess.py              # Lazy q_crop/q_bin/r_bin
+├── preprocess_raw.py          # Raw-data bin & crop → EMD/H5 export
 ├── virtual.py                 # BF/ADF/HAADF/COM/ring computation
 ├── fingerprints.py            # Radial fingerprint profiles
 ├── phase.py                   # PCA + NMF + KMeans screening
