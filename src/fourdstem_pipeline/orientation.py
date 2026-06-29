@@ -135,10 +135,10 @@ def _match_templates(patterns: np.ndarray, templates: np.ndarray) -> tuple[np.nd
 
 def _com_angle_preview(patterns: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     sy, sx = patterns.shape[-2:]
-    yy, xx = np.indices((sy, sx))
-    total = np.maximum(patterns.sum(axis=(-2, -1)), 1e-12)
-    com_x = (patterns * xx).sum(axis=(-2, -1)) / total - (sx - 1) / 2
-    com_y = (patterns * yy).sum(axis=(-2, -1)) / total - (sy - 1) / 2
+    yy, xx = np.indices((sy, sx), dtype=np.float32)
+    total = np.maximum(patterns.sum(axis=(-2, -1), dtype=np.float32), 1e-12)
+    com_x = (patterns * xx).sum(axis=(-2, -1), dtype=np.float32) / total - (sx - 1) / 2
+    com_y = (patterns * yy).sum(axis=(-2, -1), dtype=np.float32) / total - (sy - 1) / 2
     angle = np.mod(np.arctan2(com_y, com_x), 2 * np.pi)
     idx = np.floor(angle / (2 * np.pi) * 36).astype(np.int16)
     score = np.sqrt(com_x**2 + com_y**2).astype(np.float32)
@@ -153,7 +153,7 @@ def _bin_navigation(block: np.ndarray, by: int, bx: int) -> np.ndarray:
     for y0 in range(0, ny, by):
         row = []
         for x0 in range(0, nx, bx):
-            row.append(block[y0 : y0 + by, x0 : x0 + bx].mean(axis=(0, 1)))
+            row.append(block[y0 : y0 + by, x0 : x0 + bx].mean(axis=(0, 1), dtype=np.float32))
         out.append(row)
     return np.asarray(out, dtype=np.float32)
 

@@ -12,7 +12,7 @@ def annular_mask(
 ) -> np.ndarray:
     sy, sx = signal_shape
     cy, cx = center if center is not None else ((sy - 1) / 2, (sx - 1) / 2)
-    yy, xx = np.indices(signal_shape)
+    yy, xx = np.indices(signal_shape, dtype=np.float32)
     rr = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
     return (rr >= float(inner_radius)) & (rr < float(outer_radius))
 

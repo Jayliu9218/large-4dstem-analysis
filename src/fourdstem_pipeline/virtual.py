@@ -35,11 +35,11 @@ def compute_virtual_images(
     images = {name: np.zeros(nav_shape, dtype=np.float32) for name in masks}
     com_x = np.zeros(nav_shape, dtype=np.float32)
     com_y = np.zeros(nav_shape, dtype=np.float32)
-    mean_sum = np.zeros(sig_shape, dtype=np.float64)
+    mean_sum = np.zeros(sig_shape, dtype=np.float32)
     max_diff = np.zeros(sig_shape, dtype=np.float32)
     n_patterns = 0
 
-    yy, xx = np.indices(sig_shape)
+    yy, xx = np.indices(sig_shape, dtype=np.float32)
     blocks = list(iter_navigation_slices(nav_shape, block_shape))
     n_blocks = len(blocks)
     log.info("Computing %d virtual images across %d navigation blocks (block_shape=%s)", len(masks), n_blocks, block_shape)
@@ -52,7 +52,7 @@ def compute_virtual_images(
         total = np.maximum(block.sum(axis=(-2, -1)), 1e-12)
         com_x[ys, xs] = (block * xx).sum(axis=(-2, -1)) / total
         com_y[ys, xs] = (block * yy).sum(axis=(-2, -1)) / total
-        mean_sum += block.sum(axis=(0, 1))
+        mean_sum += block.sum(axis=(0, 1), dtype=np.float32)
         max_diff = np.maximum(max_diff, block.max(axis=(0, 1)))
         n_patterns += block.shape[0] * block.shape[1]
 

@@ -54,7 +54,7 @@ def screen_phases(
     labels = labels_flat.reshape(nav_shape)
 
     representative_profiles = np.vstack([
-        matrix[labels_flat == label].mean(axis=0) if np.any(labels_flat == label) else np.zeros(matrix.shape[1])
+        matrix[labels_flat == label].mean(axis=0, dtype=np.float32) if np.any(labels_flat == label) else np.zeros(matrix.shape[1], dtype=np.float32)
         for label in range(n_clusters)
     ]).astype(np.float32)
 
@@ -98,7 +98,7 @@ def _score_candidates(matrix: np.ndarray, nav_shape: tuple[int, int], candidate_
 
 def _cluster_confidence(embedding: np.ndarray, labels: np.ndarray, n_clusters: int) -> np.ndarray:
     centers = np.vstack([
-        embedding[labels == label].mean(axis=0) if np.any(labels == label) else np.zeros(embedding.shape[1])
+        embedding[labels == label].mean(axis=0, dtype=np.float32) if np.any(labels == label) else np.zeros(embedding.shape[1], dtype=np.float32)
         for label in range(n_clusters)
     ])
     distances = np.linalg.norm(embedding - centers[labels], axis=1)

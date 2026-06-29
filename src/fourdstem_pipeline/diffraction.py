@@ -78,8 +78,9 @@ class DiffractionSignal:
     def get_mean_pattern(self) -> "DiffractionSignal":
         """Return the mean diffraction pattern averaged over navigation."""
         if self.data.ndim == 4:
-            mean = np.asarray(self.data, dtype=np.float64).mean(axis=(0, 1))
-            return DiffractionSignal(mean.astype(np.float32), self.calibration)
+            data = np.asarray(self.data, dtype=np.float32)
+            mean = data.mean(axis=(0, 1), dtype=np.float32)
+            return DiffractionSignal(mean, self.calibration)
         return DiffractionSignal(np.asarray(self.data, dtype=np.float32).copy(), self.calibration)
 
     def get_polar(
@@ -106,14 +107,14 @@ class DiffractionSignal:
         pattern = self.get_mean_pattern().data
         cy, cx = self.calibration.beam_center_yx
         h, w = pattern.shape
-        yy, xx = np.indices(pattern.shape)
+        yy, xx = np.indices(pattern.shape, dtype=np.float32)
         radii = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
         bins = np.floor(radii).astype(np.int32)
         max_bin = int(bins.max())
         sums = np.bincount(bins.ravel(), weights=np.nan_to_num(pattern, nan=0.0).ravel(), minlength=max_bin + 1)
         counts = np.bincount(bins.ravel(), minlength=max_bin + 1)
         profile = sums / np.maximum(counts, 1)
-        return np.arange(max_bin + 1, dtype=np.float64), profile.astype(np.float64)
+        return np.arange(max_bin + 1, dtype=np.float32), profile.astype(np.float32)
 
     def apply_gamma(self, gamma: float = 0.5) -> "DiffractionSignal":
         """Apply power-law gamma correction (in-place on data)."""
@@ -228,13 +229,13 @@ class PolarSignal:
             )
 
         # Normalise templates and data.
-        tmpl_flat = templates.reshape(n_templates, -1).astype(np.float64)
-        tmpl_mean = tmpl_flat.mean(axis=1, keepdims=True)
-        tmpl_std = tmpl_flat.std(axis=1, keepdims=True)
+        tmpl_flat = templates.reshape(n_templates, -1).astype(np.float32)
+        tmpl_mean = tmpl_flat.mean(axis=1, keepdims=True, dtype=np.float32)
+        tmpl_std = tmpl_flat.std(axis=1, keepdims=True, dtype=np.float32)
         tmpl_std = np.maximum(tmpl_std, 1e-12)
         tmpl_norm = (tmpl_flat - tmpl_mean) / tmpl_std
 
-        data_flat = np.asarray(self.data, dtype=np.float64).ravel()
+        data_flat = np.asarray(self.data, dtype=np.float32).ravel()
         data_mean = float(data_flat.mean())
         data_std = max(float(data_flat.std()), 1e-12)
         data_norm = (data_flat - data_mean) / data_std

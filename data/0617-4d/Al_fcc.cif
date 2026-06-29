@@ -1,9 +1,0 @@
-# Al FCC, space group 225 (Fm-3m), a = 4.050 A
-data_Al_fcc
-_cell_length_a   4.050
-_cell_length_b   4.050
-_cell_length_c   4.050
-_cell_angle_alpha   90.0
-_cell_angle_beta   90.0
-_cell_angle_gamma   90.0
-_symmetry_Int_Tables_number   225

@@ -1041,7 +1041,7 @@ def _process_one_roi(
 
     # --- Visualise mean diffraction pattern ----------------------------------
     try:
-        mean_dp = np.asarray(roi_data.mean(axis=(0, 1)), dtype=np.float32)
+        mean_dp = np.asarray(roi_data.mean(axis=(0, 1), dtype=np.float32), dtype=np.float32)
         save_png(roi_dir / "mean_dp.png", np.log1p(mean_dp))
     except Exception:
         pass
@@ -1054,7 +1054,7 @@ def _process_one_roi(
         binned_sig_shape = dc_roi.data.shape[-2:]
 
     # --- Template: mean diffraction pattern over the ROI --------------------
-    template = np.asarray(dc_roi.data.mean(axis=(0, 1)), dtype=np.float32)
+    template = np.asarray(dc_roi.data.mean(axis=(0, 1), dtype=np.float32), dtype=np.float32)
 
     # --- Run Bragg disk detection -------------------------------------------
     # bragg_kwargs are already in camelCase form (converted upstream).
@@ -1085,7 +1085,7 @@ def _process_one_roi(
     if central_exclusion_radius > 0 and beam_center_yx is not None:
         bc_y_binned = float(beam_center_yx[0]) / float(bin_q)
         bc_x_binned = float(beam_center_yx[1]) / float(bin_q)
-        yy, xx = np.indices(vmap.shape, dtype=np.float64)
+        yy, xx = np.indices(vmap.shape, dtype=np.float32)
         rr = np.sqrt((yy - bc_y_binned) ** 2 + (xx - bc_x_binned) ** 2)
         central_mask = rr < float(central_exclusion_radius)
         n_excluded = int(np.sum(central_mask & (vmap > 0)))

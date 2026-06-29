@@ -62,6 +62,53 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(npz.signal_shape, (8, 10))
         self.assertEqual(npz.describe()["source_backend"], "numpy")
 
+    def test_raw_export_binning_uses_uint16_mean_not_sum(self):
+        from fourdstem_pipeline.preprocess_raw import _bin_Q_mean_uint16, _bin_R_mean_uint16
+
+        class FakeCalibration:
+            def __init__(self):
+                self.r_pixel_size = 1.0
+                self.q_pixel_size = 1.0
+
+            def get_R_pixel_size(self):
+                return self.r_pixel_size
+
+            def get_R_pixel_units(self):
+                return "nm"
+
+            def set_R_pixel_size(self, value):
+                self.r_pixel_size = value
+
+            def get_Q_pixel_size(self):
+                return self.q_pixel_size
+
+            def get_Q_pixel_units(self):
+                return "A^-1"
+
+            def set_Q_pixel_size(self, value):
+                self.q_pixel_size = value
+
+        class FakeCube:
+            def __init__(self, data):
+                self.data = data
+                self.calibration = FakeCalibration()
+                self.dims = {}
+
+            def set_dim(self, axis, values, *, units, name):
+                self.dims[axis] = (values, units, name)
+
+        raw = np.arange(4 * 4 * 4 * 4, dtype=np.uint16).reshape(4, 4, 4, 4)
+        cube = FakeCube(raw.copy())
+        cube = _bin_R_mean_uint16(cube, 2)
+        cube = _bin_Q_mean_uint16(cube, 2)
+
+        expected = raw.reshape(2, 2, 2, 2, 4, 4).mean(axis=(1, 3))
+        expected = expected.reshape(2, 2, 2, 2, 2, 2).mean(axis=(3, 5))
+        self.assertEqual(cube.data.shape, (2, 2, 2, 2))
+        self.assertEqual(cube.data.dtype, np.uint16)
+        np.testing.assert_array_equal(cube.data, np.rint(expected).astype(np.uint16))
+        self.assertLess(int(cube.data[0, 0, 0, 0]), int(raw[:2, :2, :2, :2].sum()))
+
     def test_virtual_images_have_navigation_shape(self):
         dataset = load_dataset("synthetic://demo")
         masks = build_annular_masks(

@@ -37,8 +37,8 @@ def bin_and_export(
     """Load a 4D-STEM dataset, bin navigation and/or detector, and export as EMD/H5.
 
     Uses py4DSTEM's ``import_file`` (MIB) or ``read`` (H5/EMD) to load,
-    ``bin_R`` / ``bin_Q`` to downsample, and ``py4DSTEM.save`` to write a
-    standards-compliant EMD 1.0 file.
+    project-local mean binning to downsample, and ``py4DSTEM.save`` to write
+    a standards-compliant EMD 1.0 file. Binned output is stored as ``uint16``.
 
     Parameters
     ----------
@@ -93,16 +93,17 @@ def bin_and_export(
 
     # --- Bin -----------------------------------------------------------------
     if r_bin > 1:
-        log.info("Applying r_bin=%d …", r_bin)
-        cube.bin_R(r_bin)
+        log.info("Applying mean r_bin=%d -> uint16", r_bin)
+        cube = _bin_R_mean_uint16(cube, r_bin)
         new_shape = tuple(int(v) for v in cube.data.shape)
-        log.info("  after bin_R(%d): %s → %s", r_bin, original_shape, new_shape)
+        log.info("  after mean r_bin(%d): %s -> %s", r_bin, original_shape, new_shape)
+        original_shape = new_shape
 
     if q_bin > 1:
-        log.info("Applying q_bin=%d …", q_bin)
-        cube.bin_Q(q_bin)
+        log.info("Applying mean q_bin=%d -> uint16", q_bin)
+        cube = _bin_Q_mean_uint16(cube, q_bin)
         new_shape = tuple(int(v) for v in cube.data.shape)
-        log.info("  after bin_Q(%d): %s → %s", q_bin, original_shape, new_shape)
+        log.info("  after mean q_bin(%d): %s -> %s", q_bin, original_shape, new_shape)
 
     # --- Save ----------------------------------------------------------------
     try:
@@ -115,6 +116,78 @@ def bin_and_export(
     final_shape = tuple(int(v) for v in cube.data.shape)
     log.info("Exported binned DataCube → %s  (shape=%s)", out_path, final_shape)
     return out_path
+
+
+def _bin_R_mean_uint16(datacube: Any, bin_factor: int) -> Any:
+    """Mean-bin the navigation axes and store the result as uint16."""
+    bin_factor = int(bin_factor)
+    if bin_factor <= 1:
+        datacube.data = _to_uint16_intensity(datacube.data)
+        return datacube
+
+    r_nx, r_ny, q_nx, q_ny = _cube_shape(datacube)
+    crop_x = r_nx - (r_nx % bin_factor)
+    crop_y = r_ny - (r_ny % bin_factor)
+    datacube.data = datacube.data[:crop_x, :crop_y, :, :]
+    datacube.data = datacube.data.reshape(
+        crop_x // bin_factor,
+        bin_factor,
+        crop_y // bin_factor,
+        bin_factor,
+        q_nx,
+        q_ny,
+    ).mean(axis=(1, 3), dtype=np.float32)
+    datacube.data = _to_uint16_intensity(datacube.data)
+
+    calibration = getattr(datacube, "calibration", None)
+    if calibration is not None:
+        r_pixsize = calibration.get_R_pixel_size() * bin_factor
+        r_units = calibration.get_R_pixel_units()
+        datacube.set_dim(0, [0, r_pixsize], units=r_units, name="Rx")
+        datacube.set_dim(1, [0, r_pixsize], units=r_units, name="Ry")
+        calibration.set_R_pixel_size(r_pixsize)
+    return datacube
+
+
+def _bin_Q_mean_uint16(datacube: Any, bin_factor: int) -> Any:
+    """Mean-bin the diffraction axes and store the result as uint16."""
+    bin_factor = int(bin_factor)
+    if bin_factor <= 1:
+        datacube.data = _to_uint16_intensity(datacube.data)
+        return datacube
+
+    r_nx, r_ny, q_nx, q_ny = _cube_shape(datacube)
+    crop_x = q_nx - (q_nx % bin_factor)
+    crop_y = q_ny - (q_ny % bin_factor)
+    datacube.data = datacube.data[:, :, :crop_x, :crop_y]
+    datacube.data = datacube.data.reshape(
+        r_nx,
+        r_ny,
+        crop_x // bin_factor,
+        bin_factor,
+        crop_y // bin_factor,
+        bin_factor,
+    ).mean(axis=(3, 5), dtype=np.float32)
+    datacube.data = _to_uint16_intensity(datacube.data)
+
+    calibration = getattr(datacube, "calibration", None)
+    if calibration is not None:
+        q_pixsize = calibration.get_Q_pixel_size() * bin_factor
+        q_units = calibration.get_Q_pixel_units()
+        datacube.set_dim(2, [0, q_pixsize], units=q_units, name="Qx")
+        datacube.set_dim(3, [0, q_pixsize], units=q_units, name="Qy")
+        calibration.set_Q_pixel_size(q_pixsize)
+    return datacube
+
+
+def _cube_shape(datacube: Any) -> tuple[int, int, int, int]:
+    return tuple(int(v) for v in datacube.data.shape)  # type: ignore[return-value]
+
+
+def _to_uint16_intensity(data: Any) -> np.ndarray:
+    arr = np.asarray(data, dtype=np.float32)
+    info = np.iinfo(np.uint16)
+    return np.rint(np.clip(arr, info.min, info.max)).astype(np.uint16)
 
 
 def crop_navigation_and_export(

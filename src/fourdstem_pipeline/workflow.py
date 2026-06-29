@@ -710,7 +710,7 @@ def _run_roi_bragg(data_cfg: dict[str, Any], roi_cfg: dict[str, Any], output_dir
     if bin_q > 1:
         dc_roi = dc_roi.bin_Q(bin_q, dtype=np.float32)
 
-    template = np.asarray(dc_roi.data.mean(axis=(0, 1)), dtype=np.float32)
+    template = np.asarray(dc_roi.data.mean(axis=(0, 1), dtype=np.float32), dtype=np.float32)
     bragg = dc_roi.find_Bragg_disks(
         template=template,
         corrPower=float(roi_cfg.get("corr_power", 1.0)),

@@ -897,7 +897,7 @@ def _template_match_roi(
             if bin_y > 1 and bin_x > 1 and tmpl_h % bin_y == 0 and tmpl_w % bin_x == 0:
                 stack = stack.reshape(
                     stack.shape[0], data_h, bin_y, data_w, bin_x,
-                ).mean(axis=(2, 4))
+                ).mean(axis=(2, 4), dtype=np.float32)
             else:
                 log.warning(
                     "Template shape %s cannot be binned to match data shape %s for %s",
@@ -1891,17 +1891,17 @@ def _save_experimental_template_peak_overlay(
 
 
 def _radial_profile(image: np.ndarray, center_yx: tuple[float, float] | None = None) -> tuple[np.ndarray, np.ndarray]:
-    arr = np.asarray(image, dtype=np.float64)
+    arr = np.asarray(image, dtype=np.float32)
     h, w = arr.shape
     cy, cx = center_yx if center_yx is not None else ((h - 1) / 2.0, (w - 1) / 2.0)
-    yy, xx = np.indices(arr.shape)
+    yy, xx = np.indices(arr.shape, dtype=np.float32)
     radii = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
     bins = np.floor(radii).astype(np.int32)
     max_bin = int(bins.max())
     sums = np.bincount(bins.ravel(), weights=np.nan_to_num(arr, nan=0.0).ravel(), minlength=max_bin + 1)
     counts = np.bincount(bins.ravel(), minlength=max_bin + 1)
     profile = sums / np.maximum(counts, 1)
-    return np.arange(max_bin + 1, dtype=np.float64), profile.astype(np.float64)
+    return np.arange(max_bin + 1, dtype=np.float32), profile.astype(np.float32)
 
 
 def _radial_local_maxima(profile: np.ndarray) -> np.ndarray:
@@ -2891,7 +2891,7 @@ def _render_gaussian_spots(
 def _mean_diffraction_pattern(roi_data: np.ndarray) -> np.ndarray:
     arr = np.asarray(roi_data, dtype=np.float32)
     if arr.ndim == 4:
-        return arr.mean(axis=(0, 1))
+        return arr.mean(axis=(0, 1), dtype=np.float32)
     if arr.ndim == 2:
         return arr
     raise ValueError(f"ROI data must be 2D or 4D, got shape {arr.shape}.")

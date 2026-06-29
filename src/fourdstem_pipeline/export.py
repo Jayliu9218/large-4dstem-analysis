@@ -329,7 +329,7 @@ def save_profile_png(
         y = int(y1 - frac * (y1 - y0))
         canvas[y, x0:x1 + 1] = 225
 
-    profile = np.asarray(profiles, dtype=np.float32).reshape(-1, profiles.shape[-1]).mean(axis=0)
+    profile = np.asarray(profiles, dtype=np.float32).reshape(-1, profiles.shape[-1]).mean(axis=0, dtype=np.float32)
     radii = np.asarray(radii, dtype=np.float32)
     if radii.size != profile.size:
         radii = np.arange(profile.size, dtype=np.float32)
@@ -1279,7 +1279,7 @@ def mask_center_for_display(
     arr = np.asarray(image, dtype=np.float32).copy()
     h, w = arr.shape
     cy, cx = center_yx if center_yx is not None else ((h - 1) / 2.0, (w - 1) / 2.0)
-    yy, xx = np.indices(arr.shape)
+    yy, xx = np.indices(arr.shape, dtype=np.float32)
     r = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
     if radius_px > 0:
         arr[r < radius_px] = 0.0
@@ -1327,7 +1327,7 @@ def polar_reproject(
     h, w = arr.shape
     cy, cx = center_yx if center_yx is not None else ((h - 1) / 2.0, (w - 1) / 2.0)
 
-    yy, xx = np.indices(arr.shape)
+    yy, xx = np.indices(arr.shape, dtype=np.float32)
     radii = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
     angles = np.arctan2(yy - cy, xx - cx)  # [-π, π]
     angles = np.where(angles < 0, angles + 2 * np.pi, angles)  # [0, 2π]

@@ -313,13 +313,16 @@ on every pipeline run.
 
 ```powershell
 # MIB: R_bin=4 (512→128 nav), Q_bin=2 (256→128 detector)
-python -m fourdstem_pipeline.cli bin-export \
-    --input data/scan.mib --output data/binned.h5 \
+python -m fourdstem_pipeline.cli bin-export `
+    --input "data/scan.mib" `
+    --output "data/binned.h5" `
     --r-bin 4 --q-bin 2 --scan-shape 512 512
 
 # Already-binned H5: further Q_bin only
-python -m fourdstem_pipeline.cli bin-export \
-    --input data/binned.h5 --output data/binned_q2.h5 --q-bin 2
+python -m fourdstem_pipeline.cli bin-export `
+    --input "data/binned.h5" `
+    --output "data/binned_q2.h5" `
+    --q-bin 2
 ```
 
 | Flag | Purpose |
@@ -339,8 +342,9 @@ extract a 64×64 region from a 512×512 scan for fast screening.
 
 ```powershell
 # 512×512×256×256 → 64×64×256×256 (detector unchanged)
-python -m fourdstem_pipeline.cli crop-export \
-    --input data/scan.mib --output data/cropped.h5 \
+python -m fourdstem_pipeline.cli crop-export `
+    --input "data/scan.mib" `
+    --output "data/cropped.h5" `
     --nav-crop 0 64 0 64 --scan-shape 512 512
 ```
 

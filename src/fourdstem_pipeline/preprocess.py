@@ -167,9 +167,9 @@ def _slice_from_key(key: Any, length: int) -> slice:
 
 def _bin_navigation(block: np.ndarray, factor: int) -> np.ndarray:
     ry, rx, qy, qx = block.shape
-    return block.reshape(ry // factor, factor, rx // factor, factor, qy, qx).mean(axis=(1, 3))
+    return block.reshape(ry // factor, factor, rx // factor, factor, qy, qx).mean(axis=(1, 3), dtype=np.float32)
 
 
 def _bin_signal(block: np.ndarray, factor: int) -> np.ndarray:
     ry, rx, qy, qx = block.shape
-    return block.reshape(ry, rx, qy // factor, factor, qx // factor, factor).mean(axis=(3, 5))
+    return block.reshape(ry, rx, qy // factor, factor, qx // factor, factor).mean(axis=(3, 5), dtype=np.float32)

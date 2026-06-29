@@ -64,7 +64,7 @@ def compute_radial_fingerprints(
 def _radial_bin_index(signal_shape: tuple[int, int], center: tuple[float, float] | list[float] | None, bins: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     sy, sx = signal_shape
     cy, cx = center if center is not None else ((sy - 1) / 2, (sx - 1) / 2)
-    yy, xx = np.indices(signal_shape)
+    yy, xx = np.indices(signal_shape, dtype=np.float32)
     rr = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
     max_radius = rr.max()
     edges = np.linspace(0, max_radius + 1e-6, bins + 1)

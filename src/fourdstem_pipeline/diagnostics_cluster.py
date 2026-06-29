@@ -31,8 +31,8 @@ def cluster_mean_diffraction(
     cluster_ids: list[int],
     block_shape: tuple[int, int],
 ) -> np.ndarray:
-    sums = np.zeros((len(cluster_ids),) + dataset.signal_shape, dtype=np.float64)
-    counts = np.zeros(len(cluster_ids), dtype=np.int64)
+    sums = np.zeros((len(cluster_ids),) + dataset.signal_shape, dtype=np.float32)
+    counts = np.zeros(len(cluster_ids), dtype=np.int32)
     id_to_idx = {cluster_id: idx for idx, cluster_id in enumerate(cluster_ids)}
     for ys, xs in iter_navigation_slices(dataset.navigation_shape, block_shape):
         block = as_numpy_block(dataset.data[ys, xs, :, :]).astype(np.float32, copy=False)
@@ -41,7 +41,7 @@ def cluster_mean_diffraction(
             mask = block_labels == cluster_id
             if np.any(mask):
                 idx = id_to_idx[cluster_id]
-                sums[idx] += block[mask].sum(axis=0)
+                sums[idx] += block[mask].sum(axis=0, dtype=np.float32)
                 counts[idx] += int(mask.sum())
     return (sums / np.maximum(counts[:, None, None], 1)).astype(np.float32)
 
@@ -62,8 +62,8 @@ def cluster_radial_profiles(
     stds = []
     for cluster_id in cluster_ids:
         selected = matrix[flat_labels == cluster_id]
-        means.append(selected.mean(axis=0) if selected.size else np.zeros(matrix.shape[1], dtype=np.float32))
-        stds.append(selected.std(axis=0) if selected.size else np.zeros(matrix.shape[1], dtype=np.float32))
+        means.append(selected.mean(axis=0, dtype=np.float32) if selected.size else np.zeros(matrix.shape[1], dtype=np.float32))
+        stds.append(selected.std(axis=0, dtype=np.float32) if selected.size else np.zeros(matrix.shape[1], dtype=np.float32))
     return np.asarray(means, dtype=np.float32), np.asarray(stds, dtype=np.float32)
 
 
@@ -374,13 +374,15 @@ def cluster_matrix(matrix: np.ndarray, nav_shape: tuple[int, int], n_clusters: i
 
 
 def _zscore(matrix: np.ndarray) -> np.ndarray:
-    return (matrix - matrix.mean(axis=1, keepdims=True)) / np.maximum(matrix.std(axis=1, keepdims=True), 1e-12)
+    mean = matrix.mean(axis=1, keepdims=True, dtype=np.float32)
+    std = matrix.std(axis=1, keepdims=True, dtype=np.float32)
+    return ((matrix - mean) / np.maximum(std, 1e-12)).astype(np.float32)
 
 
 def _metric_sample(matrix: np.ndarray, max_samples: int = 5000) -> np.ndarray:
     if matrix.shape[0] <= max_samples:
-        return np.arange(matrix.shape[0])
-    return np.linspace(0, matrix.shape[0] - 1, max_samples).astype(int)
+        return np.arange(matrix.shape[0], dtype=np.int32)
+    return np.linspace(0, matrix.shape[0] - 1, max_samples).astype(np.int32)
 
 
 def _fragmentation(labels: np.ndarray) -> float:
