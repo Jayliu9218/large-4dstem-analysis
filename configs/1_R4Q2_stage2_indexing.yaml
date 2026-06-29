@@ -1,0 +1,51 @@
+# Stage 2B: Phase Indexing — 1_R4Q2 (Ti-bcc / Ti-hcp)
+# ======================================================
+# Consumes accepted Stage 2A ROI Bragg outputs.  Generates analytic kinematic
+# templates for Ti-bcc and Ti-hcp, matches against ROI mean diffraction
+# patterns, and reports candidate phases with confidence tiers.
+
+# Stage 2A output directory containing stage2_summary.json.
+stage2_dir: outputs/1_R4Q2/stage2/roi_bragg
+
+# Optional output directory. Defaults to <stage2_dir>/stage2b_indexing/.
+output_dir: null
+
+# Analytic CIF-to-template generation.
+# reciprocal_pixels_per_inv_angstrom is set to null for auto-scaling
+# since the exact camera length for this dataset is unknown.
+template_generation:
+  max_index: 4
+  zone_axes:
+    - [0, 0, 1]
+    - [1, 0, 0]
+    - [1, 1, 0]
+    - [1, 1, 1]
+    - [1, 1, 2]
+  orientation_step_deg: 5
+  orientations_deg: null
+  peak_sigma_px: 5.0
+  reciprocal_pixels_per_inv_angstrom: null
+  intensity_power: 2.0
+
+# v4 phase/orientation evidence controls.
+matching:
+  top_k_per_phase: 5
+  radial_gate_enabled: true
+  radial_min_support: 0.25
+  phase_margin_threshold: 0.08
+  orientation_margin_threshold: 0.05
+
+# Candidate CIFs — only Ti-bcc and Ti-hcp.
+# space_group overrides the CIF's P1 convenience setting for proper
+# systematic-extinction filtering:
+#   Ti-hcp → P6_3/mmc (194): 00l with l odd removed
+#   Ti-bcc → Im-3m (229):   h+k+l odd removed
+candidate_cifs:
+  - name: Ti_bcc
+    phase: Ti-bcc
+    path: data/0617-4d/Ti-bcc.cif
+    space_group: 229
+  - name: Ti_hcp
+    phase: Ti-hcp
+    path: data/0617-4d/Ti-hcp.cif
+    space_group: 194

@@ -70,22 +70,35 @@ crystallographic phase validation with ambiguity detection**.
 
 ## Installation
 
-### Quick: conda (recommended)
+### Prerequisites
+
+- **Conda environment `large-4dstem`** — provides py4DSTEM, HyperSpy, scikit-learn,
+  and all other dependencies.  All commands below assume the environment is active.
+
+### Setup
 
 ```bash
-conda env create -f environment.yml
+# 1. Activate the environment
 conda activate large-4dstem
-pip install -e ".[test,large-data,diffraction]"
-```
 
-### Verify
+# 2. Install this package in editable mode
+pip install -e .
 
-```bash
+# 3. Verify
 python -m fourdstem_pipeline.cli dry_run --config configs/default_workflow.yaml
 ```
 
-All commands use `python -m fourdstem_pipeline.cli <subcommand>` and work even
-if pip-installed scripts are not on PATH.
+### Environment location
+
+| Platform | Path |
+|----------|------|
+| Windows (user) | `C:\Users\<user>\.conda\envs\large-4dstem` |
+| Linux / macOS | `<conda_root>/envs/large-4dstem` |
+
+> **Windows note:** If you see `Windows Error 0xc06d007f` when importing
+> py4DSTEM, this is a known OpenBLAS/threadpoolctl compatibility issue.
+> Workaround: `pip install threadpoolctl==3.5.0` in the `large-4dstem`
+> environment, or set `SET OPENBLAS_CORETYPE=Haswell` before running.
 
 ---
 
@@ -514,9 +527,12 @@ All stages follow a unified contract (`data_contract.json`):
 | `0617_4d_workflow_rbin1.yaml` | Ti: full 512×512 nav |
 | `0617_4d_workflow_rbin2.yaml` | Ti: 256×256 nav |
 | `0617_4d_stage1_enhanced.yaml` | Ti: enhanced QC + fingerprint-class screening |
+| `1_R4Q2_workflow.yaml` | Ti: H5 data 128×128×128×128, `r_bin=2`, Ti-bcc/hcp candidates |
 | `stage2_roi_bragg.yaml` | Stage 2A Bragg detection (`save_roi_data: true`, `minRelativeIntensity: 0.10`, central exclusion) |
+| `1_R4Q2_stage2_roi_bragg.yaml` | Stage 2A for 1_R4Q2 (128×128, `thin_r=1`, `bin_q=2`) |
 | `stage2_smoke_test.yaml` | Stage 2A smoke test (`max_rois: 1`) |
 | `stage2_indexing.yaml` | Stage 2B v3 indexing (7 CIFs, 5 zone axes, physical calibration, space-group extinctions) |
+| `1_R4Q2_stage2_indexing.yaml` | Stage 2B for 1_R4Q2 (Ti-bcc + Ti-hcp only, auto-scale calibration) |
 
 ---
 
@@ -658,14 +674,34 @@ scripts/
 
 ## Troubleshooting
 
-### Python not found (Windows)
+### Environment
+
+All commands require the `large-4dstem` conda environment:
+
+```powershell
+conda activate large-4dstem
+```
+
+### Python not found / wrong version (Windows)
 
 The Windows Store Python stub doesn't work in non-interactive shells.
-Use Miniconda Python or activate the environment first:
+Use the `large-4dstem` conda environment:
 
 ```powershell
 conda activate large-4dstem
 python -m fourdstem_pipeline.cli dry_run --config configs/default_workflow.yaml
+```
+
+### py4DSTEM: `Windows Error 0xc06d007f`
+
+This is a known OpenBLAS / threadpoolctl compatibility issue on Windows.
+Fix inside the `large-4dstem` environment:
+
+```powershell
+conda activate large-4dstem
+pip install threadpoolctl==3.5.0
+# Or set the environment variable:
+set OPENBLAS_CORETYPE=Haswell
 ```
 
 ### CLI commands not found

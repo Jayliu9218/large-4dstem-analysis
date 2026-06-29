@@ -1,0 +1,47 @@
+# Stage 2A: ROI Bragg Detection — 1_R4Q2
+# ==========================================
+# Consumes Stage-1 output and runs py4DSTEM Bragg-disk detection.
+
+# Path to the Stage-1 output directory containing stage1_summary.json.
+stage1_dir: outputs/1_R4Q2
+
+# Optional: explicit path to the original 4D-STEM data file.
+data_path: data/0617-4d/1_R4Q2.h5
+
+# Optional: override the default output directory.
+output_dir: null
+
+# ROI source: "roi_candidates" (default) reads roi_candidates.yaml.
+roi_source: roi_candidates
+
+# Cap the number of ROIs processed (null = all candidates).
+max_rois: null
+
+# -- Extraction parameters --
+thin_r: 1    # Keep all navigation positions
+bin_q: 2     # 128→64 detector binning
+
+# py4DSTEM memory mode.
+mem: MEMMAP
+
+# Optional raw navigation shape [ny, nx] for py4DSTEM.import_file.
+# 128×128 scan × r_bin(2) = 256×256 raw scan shape.
+scan_shape: [256, 256]
+
+# -- py4DSTEM Bragg-disk detection parameters --
+corr_power: 1.0
+sigma_cc: 1
+edge_boundary: 10
+min_relative_intensity: 0.10
+min_peak_spacing: 4
+subpixel: poly
+max_num_peaks: 70
+cuda: false
+
+# Central exclusion radius in binned detector pixels (after bin_q).
+# At bin_q=2 and 128×128 detector, binned shape is 64×64; a radius of
+# 20 px excludes the central beam disk.
+central_exclusion_radius: 20
+
+# Save the extracted 4D sub-cube (roi_data.npy) for each ROI.
+save_roi_data: true

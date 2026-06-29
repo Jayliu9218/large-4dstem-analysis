@@ -12,6 +12,95 @@ from .synthetic import make_synthetic_4dstem
 log = get_logger(__name__)
 
 
+def _load_h5(
+    data_path: Path,
+    *,
+    lazy: bool = True,
+    scan_shape: tuple | None = None,
+    detector_shape: tuple | None = None,
+    backend: str | None = None,
+) -> DatasetHandle:
+    """Load a 4D-STEM dataset from an HDF5 file via h5py."""
+    import h5py
+
+    f = h5py.File(data_path, "r")
+
+    # Find the largest 4D dataset in the file.
+    candidate_paths: list[tuple[str, tuple[int, ...], type]] = []
+
+    def _visit(name: str, obj: Any) -> None:
+        if isinstance(obj, h5py.Dataset) and obj.ndim >= 2:
+            candidate_paths.append((name, obj.shape, obj.dtype))
+
+    f.visititems(_visit)
+
+    # Prefer datasets named "data" under a "datacube" group (common convention).
+    data_path_h5: str | None = None
+    for name, shape, _dtype in candidate_paths:
+        if name.endswith("/data") and "datacube" in name and len(shape) >= 2:
+            data_path_h5 = name
+            break
+
+    # Fall back to the largest 4D dataset.
+    if data_path_h5 is None:
+        datasets_4d = [(n, s, d) for n, s, d in candidate_paths if len(s) == 4]
+        if datasets_4d:
+            datasets_4d.sort(key=lambda x: int(np.prod(x[1])), reverse=True)
+            data_path_h5 = datasets_4d[0][0]
+        elif candidate_paths:
+            # No 4D dataset — take the largest 2D/3D one.
+            candidate_paths.sort(key=lambda x: int(np.prod(x[1])), reverse=True)
+            data_path_h5 = candidate_paths[0][0]
+
+    if data_path_h5 is None:
+        f.close()
+        raise ValueError(f"No suitable dataset found in {data_path}. Available: {[n for n, _, _ in candidate_paths]}")
+
+    ds = f[data_path_h5]
+    shape = ds.shape
+    dtype_np = ds.dtype
+
+    if len(shape) < 2:
+        f.close()
+        raise ValueError(f"Dataset {data_path_h5} in {data_path} has only {len(shape)} dimensions; need ≥ 2.")
+
+    # For 2D data (single diffraction pattern), add dummy navigation dims.
+    if len(shape) == 2:
+        data = np.asarray(ds[:], dtype=np.float32)
+        data = data[None, None, :, :]  # (1, 1, qy, qx)
+    elif len(shape) == 3:
+        data = np.asarray(ds[:], dtype=np.float32)
+        data = data[:, None, :, :]  # (ny, 1, qy, qx)
+    else:
+        # 4D: load eagerly for small/medium data; h5py doesn't support
+        # memory-mapping, but slicing + numpy is fine for ≤ 1 GB datasets.
+        data = np.asarray(ds[:], dtype=np.float32)
+        # Handle 5+D if needed.
+        if len(shape) > 4:
+            data = data.reshape(-1, shape[-2], shape[-1])
+            data = data.reshape((1, 1) + data.shape)
+
+    f.close()
+
+    if scan_shape is None:
+        scan_shape = tuple(int(v) for v in data.shape[:2])
+    if detector_shape is None:
+        detector_shape = tuple(int(v) for v in data.shape[-2:])
+
+    return DatasetHandle(
+        data=data,
+        source="h5",
+        metadata={
+            "path": str(data_path),
+            "h5_dataset": data_path_h5,
+            "source_backend": backend or "h5py",
+            "scan_shape": scan_shape,
+            "detector_shape": detector_shape,
+            "original_dtype": str(dtype_np),
+        },
+    )
+
+
 def load_dataset(
     path: str | Path,
     *,
@@ -85,6 +174,9 @@ def load_dataset(
                 "detector_shape": tuple(data.shape[-2:]),
             },
         )
+
+    if suffix in (".h5", ".hdf5"):
+        return _load_h5(data_path, lazy=lazy, scan_shape=scan_shape, detector_shape=detector_shape, backend=backend)
 
     if suffix == ".mib":
         return _load_mib_with_hyperspy(
