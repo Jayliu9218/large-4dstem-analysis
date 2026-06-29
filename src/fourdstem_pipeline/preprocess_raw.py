@@ -121,11 +121,12 @@ def bin_and_export(
 
 
 def _chunked_bin_R(datacube: Any, bin_factor: int) -> Any:
-    """Mean-bin navigation axes in chunks — never loads the full array into RAM.
+    """Mean-bin navigation axes in chunks.
 
     Processes one output row at a time: reads *bin_factor* input nav rows
-    from the memory-mapped source, computes the mean, writes to a memmap
-    output.  After binning, replaces ``datacube.data`` with the result.
+    from the memory-mapped source, computes the mean, and accumulates into
+    a pre-allocated output array.  Uses float32 for the working buffer
+    (one output row at a time), then stores as uint16.
     """
     import py4DSTEM
 
@@ -133,46 +134,39 @@ def _chunked_bin_R(datacube: Any, bin_factor: int) -> Any:
     if bin_factor <= 1:
         return datacube
 
-    src = datacube.data  # memory-mapped or ndarray
+    src = datacube.data
     r_nx, r_ny, q_nx, q_ny = (int(v) for v in src.shape)
     crop_y = r_ny - (r_ny % bin_factor)
     crop_x = r_nx - (r_nx % bin_factor)
-    out_ny = crop_y // bin_factor
     out_nx = crop_x // bin_factor
+    out_ny = crop_y // bin_factor
 
-    # Create a temporary memmap for the binned output.
-    import tempfile, os
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".dat", prefix="binR_")
-    os.close(tmp_fd)
-    try:
-        out = np.memmap(tmp_path, dtype=np.float32, mode="w+", shape=(out_nx, out_ny, q_nx, q_ny))
-        # Process one output row at a time.
-        for out_i in range(out_nx):
-            in_slice = src[out_i * bin_factor : (out_i + 1) * bin_factor, :crop_y, :, :]
-            # mean over the bin_factor rows: (bin_factor, crop_y, q_nx, q_ny) -> (crop_y, q_nx, q_ny)
-            out[out_i, :, :, :] = in_slice.mean(axis=0, dtype=np.float32)
+    # Allocate output as uint16 to keep memory manageable.
+    # For R_bin=2 on 512x512→256x256: 256*256*256*256*uint16 = 8 GiB.
+    # For R_bin=4 on 512x512→128x128: 128*128*256*256*uint16 = 2 GiB.
+    out = np.zeros((out_nx, out_ny, q_nx, q_ny), dtype=np.uint16)
 
-        # Wrap result in a new DataCube.
-        new_cube = py4DSTEM.io.datacube.DataCube(data=out)
-        calibration = getattr(datacube, "calibration", None)
-        if calibration is not None:
-            new_cube.calibration = calibration
-            r_pixsize = calibration.get_R_pixel_size() * bin_factor
-            r_units = calibration.get_R_pixel_units()
-            new_cube.set_dim(0, [0, r_pixsize], units=r_units, name="Rx")
-            new_cube.set_dim(1, [0, r_pixsize], units=r_units, name="Ry")
-        return new_cube
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        raise
+    for out_i in range(out_nx):
+        # Read one chunk: bin_factor input rows → all columns → full detector
+        in_slice = np.asarray(
+            src[out_i * bin_factor : (out_i + 1) * bin_factor, :crop_y, :, :],
+            dtype=np.float32,
+        )
+        # Mean over the bin_factor dimension → (crop_y, q_nx, q_ny) float32
+        row_mean = in_slice.mean(axis=0, dtype=np.float32)
+        out[out_i, :, :, :] = _to_uint16_intensity(row_mean)
+
+    new_cube = py4DSTEM.io.datacube.DataCube(data=out)
+    _copy_calibration(datacube, new_cube, r_bin=bin_factor, q_bin=1)
+    return new_cube
 
 
 def _chunked_bin_Q(datacube: Any, bin_factor: int) -> Any:
-    """Mean-bin detector axes in chunks — never loads the full array into RAM.
+    """Mean-bin detector axes in chunks.
 
-    Processes one nav position at a time: reads the full detector pattern,
-    bins it, writes to a memmap output.
+    Processes one nav-row stripe at a time: reads a horizontal strip of
+    navigation positions, bins each detector pattern, and writes to the
+    output array.
     """
     import py4DSTEM
 
@@ -187,31 +181,47 @@ def _chunked_bin_Q(datacube: Any, bin_factor: int) -> Any:
     out_qx = crop_x // bin_factor
     out_qy = crop_y // bin_factor
 
-    import tempfile, os
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".dat", prefix="binQ_")
-    os.close(tmp_fd)
-    try:
-        out = np.memmap(tmp_path, dtype=np.float32, mode="w+", shape=(r_nx, r_ny, out_qx, out_qy))
-        # Process one nav position at a time.
-        for ny in range(r_ny):
-            for nx in range(r_nx):
-                dp = np.asarray(src[nx, ny, :crop_x, :crop_y], dtype=np.float32)
-                binned = dp.reshape(out_qx, bin_factor, out_qy, bin_factor).mean(axis=(1, 3))
-                out[nx, ny, :, :] = binned
+    out = np.zeros((r_nx, r_ny, out_qx, out_qy), dtype=np.uint16)
 
-        new_cube = py4DSTEM.io.datacube.DataCube(data=out)
-        calibration = getattr(datacube, "calibration", None)
-        if calibration is not None:
-            new_cube.calibration = calibration
-            q_pixsize = calibration.get_Q_pixel_size() * bin_factor
-            q_units = calibration.get_Q_pixel_units()
-            new_cube.set_dim(2, [0, q_pixsize], units=q_units, name="Qx")
-            new_cube.set_dim(3, [0, q_pixsize], units=q_units, name="Qy")
-        return new_cube
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        raise
+    # Process one nav-row stripe at a time.  Keep each stripe small so
+    # the float32 working buffer stays under ~200 MB even for large detectors.
+    max_stripe_mb = 192
+    px_per_row = r_ny * crop_x * crop_y * 4  # float32 bytes per nav row
+    row_stride = max(1, min(4, max_stripe_mb * 1024 * 1024 // max(px_per_row, 1)))
+    for nx_start in range(0, r_nx, row_stride):
+        nx_end = min(nx_start + row_stride, r_nx)
+        # Read stripe: (row_stride, r_ny, crop_x, crop_y) → float32
+        stripe = np.asarray(src[nx_start:nx_end, :, :crop_x, :crop_y], dtype=np.float32)
+        # Reshape and mean over bin axes: (stride, r_ny, out_qx, bin, out_qy, bin)
+        binned = stripe.reshape(nx_end - nx_start, r_ny, out_qx, bin_factor, out_qy, bin_factor)
+        binned = binned.mean(axis=(3, 5), dtype=np.float32)
+        out[nx_start:nx_end, :, :, :] = _to_uint16_intensity(binned)
+
+    new_cube = py4DSTEM.io.datacube.DataCube(data=out)
+    _copy_calibration(datacube, new_cube, r_bin=1, q_bin=bin_factor)
+    return new_cube
+
+
+def _copy_calibration(
+    src: Any, dst: Any, *, r_bin: int = 1, q_bin: int = 1,
+) -> None:
+    """Copy and scale calibration metadata from *src* to *dst* DataCube."""
+    calibration = getattr(src, "calibration", None)
+    if calibration is None:
+        return
+    dst.calibration = calibration
+    if r_bin > 1:
+        r_ps = calibration.get_R_pixel_size() * r_bin
+        r_units = calibration.get_R_pixel_units()
+        dst.set_dim(0, [0, r_ps], units=r_units, name="Rx")
+        dst.set_dim(1, [0, r_ps], units=r_units, name="Ry")
+        calibration.set_R_pixel_size(r_ps)
+    if q_bin > 1:
+        q_ps = calibration.get_Q_pixel_size() * q_bin
+        q_units = calibration.get_Q_pixel_units()
+        dst.set_dim(2, [0, q_ps], units=q_units, name="Qx")
+        dst.set_dim(3, [0, q_ps], units=q_units, name="Qy")
+        calibration.set_Q_pixel_size(q_ps)
 
 
 # -- Keep old helpers for reference (unused by the main pipeline) -------------
