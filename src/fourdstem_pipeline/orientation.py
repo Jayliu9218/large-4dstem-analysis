@@ -22,6 +22,32 @@ class OrientationResult:
     roi: tuple[int, int, int, int] | None
     output_dir: Path | None = None
 
+    def to_orientation_map(
+        self, calibration: "DiffractionCalibration | None" = None,
+    ) -> "OrientationMap":
+        """Wrap this result as an :class:`OrientationMap` for pyxem-style API use.
+
+        Parameters
+        ----------
+        calibration:
+            Optional diffraction calibration.  If ``None``, a default
+            geometric-centre calibration is created from the data shape.
+        """
+        from .contracts import DiffractionCalibration
+        from .diffraction import OrientationMap
+
+        if calibration is None:
+            calibration = DiffractionCalibration(
+                beam_center_yx=(float(self.score.shape[0]) / 2.0, float(self.score.shape[1]) / 2.0),
+            )
+        return OrientationMap(
+            orientation_index=self.orientation_index.ravel().astype(np.int16),
+            score=self.score.ravel().astype(np.float32),
+            phase_label=self.phase_label.ravel().astype(np.int16),
+            calibration=calibration,
+            template_metadata={"source": "orientation_preview"},
+        )
+
 
 def run_orientation_preview(
     dataset: DatasetHandle,

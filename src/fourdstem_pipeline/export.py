@@ -53,6 +53,167 @@ def _get_colormap(name: str = "gray") -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Cubic IPF (Inverse Pole Figure) colormap — maps crystal directions to RGB
+# using the standard convention: [001]=red, [101]=green, [111]=blue.
+# ---------------------------------------------------------------------------
+
+
+def _build_cubic_ipf_lut(size: int = 256) -> np.ndarray:
+    """Precompute a *(size, size, 3)* uint8 LUT for the cubic fundamental sector.
+
+    The LUT covers the stereographic projection of the standard stereographic
+    triangle with corners at [001] (red), [101] (green), and [111] (blue).
+    Pixels outside the sector are set to white (255, 255, 255).
+    """
+    # Stereographic grid: (X, Y) in [-1, 1] for the projection plane.
+    grid = np.linspace(-1.0, 1.0, size, dtype=np.float64)
+    XX, YY = np.meshgrid(grid, grid)
+    denom = 1.0 + XX * XX + YY * YY
+    # Inverse stereographic projection: (X,Y) → (x,y,z) unit vector.
+    x = 2.0 * XX / denom
+    y = 2.0 * YY / denom
+    z = (1.0 - XX * XX - YY * YY) / denom  # strictly positive in the hemisphere
+
+    # Take absolute values (cubic symmetry — all octants are equivalent).
+    ax, ay, az = np.abs(x), np.abs(y), np.abs(z)
+
+    # Sort each pixel's (ax, ay, az) into ascending order: a <= b <= c.
+    stacked = np.stack([ax, ay, az], axis=-1)  # (size, size, 3)
+    a = np.min(stacked, axis=-1)
+    c = np.max(stacked, axis=-1)
+    b = np.sum(stacked, axis=-1) - a - c  # middle value
+
+    # Barycentric coordinates within the fundamental triangle [001]-[101]-[111].
+    denom_c = np.maximum(c, 1e-12)
+    w_001 = (c - b) / denom_c  # red   — proximity to [001]
+    w_101 = (b - a) / denom_c  # green — proximity to [101]
+    w_111 = a / denom_c        # blue  — proximity to [111]
+
+    # Check if this pixel's sorted abs values correspond to the right sector.
+    # The fundamental sector for sorted abs values a<=b<=c with corners
+    # [001]=(0,0,1) sorted→(0,0,1), [101]=(1,0,1)/√2 sorted→(0,1,1)/√2,
+    # [111]=(1,1,1)/√3 sorted→(1,1,1)/√3.
+    # After sorting abs, we need |x|<=|y|<=|z| (which is a<=b<=c by construction).
+    # Additionally we need the point to be in the upper hemisphere (z>0) and
+    # within the stereographic triangle boundaries.
+    # Valid points in the fundamental sector satisfy: z >= y >= x >= 0
+    # After taking abs and sorting, this becomes a<=b<=c with the original
+    # point having x<=y<=z (all non-negative).
+    in_sector = (z > 0.0) & (_is_in_fundamental_sector(x, y, z))
+
+    rgb = np.full((size, size, 3), 255, dtype=np.uint8)
+    mask = in_sector
+    rgb[mask, 0] = np.clip(w_001[mask] * 255, 0, 255).astype(np.uint8)
+    rgb[mask, 1] = np.clip(w_101[mask] * 255, 0, 255).astype(np.uint8)
+    rgb[mask, 2] = np.clip(w_111[mask] * 255, 0, 255).astype(np.uint8)
+    return rgb
+
+
+def _is_in_fundamental_sector(
+    x: np.ndarray, y: np.ndarray, z: np.ndarray,
+) -> np.ndarray:
+    """Boolean mask: pixels whose *(x, y, z)* lies in the cubic fundamental sector.
+
+    For a vector with all components non-negative, the cubic fundamental
+    sector (stereographic triangle [001]–[101]–[111]) is: ``x <= y <= z``.
+    """
+    return (x >= 0.0) & (y >= x) & (z >= y)
+
+
+_CUBIC_IPF_LUT: np.ndarray = _build_cubic_ipf_lut(256)
+
+
+def apply_ipf_colors(directions_xyz: np.ndarray) -> np.ndarray:
+    """Map crystal direction unit vectors to cubic-IPF RGB colours.
+
+    Uses the standard convention: [001]→red, [101]→green, [111]→blue.
+
+    Parameters
+    ----------
+    directions_xyz:
+        ``(N, 3)`` float array of unit vectors in crystal (reciprocal)
+        coordinates.  Vectors need not be exactly normalised — the
+        function divides by the largest absolute component internally.
+
+    Returns
+    -------
+    np.ndarray
+        ``(N, 3)`` uint8 RGB colours.
+    """
+    vecs = np.asarray(directions_xyz, dtype=np.float64)
+    if vecs.ndim != 2 or vecs.shape[1] != 3:
+        raise ValueError(f"Expected (N, 3) array, got shape {vecs.shape!r}.")
+    # Normalise by max absolute component (robust to near-zero vectors).
+    norms = np.max(np.abs(vecs), axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-12)
+    v = vecs / norms
+    # Take absolute values for cubic symmetry.
+    av = np.abs(v)
+    # Sort each row ascending: a <= b <= c.
+    a = np.min(av, axis=1)
+    c = np.max(av, axis=1)
+    b = np.sum(av, axis=1) - a - c
+    # Barycentric weights.
+    denom = np.maximum(c, 1e-12)
+    w_001 = (c - b) / denom
+    w_101 = (b - a) / denom
+    w_111 = a / denom
+    rgb = np.zeros((vecs.shape[0], 3), dtype=np.uint8)
+    rgb[:, 0] = np.clip(w_001 * 255, 0, 255).astype(np.uint8)
+    rgb[:, 1] = np.clip(w_101 * 255, 0, 255).astype(np.uint8)
+    rgb[:, 2] = np.clip(w_111 * 255, 0, 255).astype(np.uint8)
+    return rgb
+
+
+def save_ipf_legend(
+    path: str | Path,
+    *,
+    size: tuple[int, int] = (256, 256),
+    label: str = "",
+) -> Path:
+    """Save the cubic IPF stereographic-triangle legend as a PNG.
+
+    Parameters
+    ----------
+    path:
+        Output PNG path.
+    size:
+        Legend image dimensions ``(width, height)`` in pixels.
+    label:
+        Optional title drawn above the triangle.
+    """
+    h, w = int(size[1]), int(size[0])
+    # Resample the precomputed LUT to the requested size.
+    lut_h, lut_w = _CUBIC_IPF_LUT.shape[:2]
+    sy = np.linspace(0, lut_h - 1, h).astype(np.int32)
+    sx = np.linspace(0, lut_w - 1, w).astype(np.int32)
+    legend = _CUBIC_IPF_LUT[sy[:, None], sx[None, :]]
+    # Add a dark border around non-white pixels.
+    is_colored = np.any(legend < 250, axis=-1)
+    border = np.zeros_like(is_colored)
+    if is_colored.shape[0] > 1 and is_colored.shape[1] > 1:
+        border[1:, :] |= is_colored[:-1, :] & ~is_colored[1:, :]
+        border[:-1, :] |= is_colored[1:, :] & ~is_colored[:-1, :]
+        border[:, 1:] |= is_colored[:, :-1] & ~is_colored[:, 1:]
+        border[:, :-1] |= is_colored[:, 1:] & ~is_colored[:, :-1]
+    border_color = np.asarray([40, 40, 40], dtype=np.uint8)
+    if label:
+        # Add header row.
+        header_h = 24
+        canvas = np.full((h + header_h, w, 3), 255, dtype=np.uint8)
+        canvas[header_h:, :, :] = legend
+        _draw_text(canvas, label.upper(), w // 2 - len(label) * 3, 6, color=(30, 30, 30), scale=1)
+    else:
+        canvas = legend.copy()
+    if np.any(border):
+        if label:
+            canvas[header_h:][border] = border_color
+        else:
+            canvas[border] = border_color
+    return save_png(path, canvas)
+
+
+# ---------------------------------------------------------------------------
 # Tight-layout margin constants (pyxem-style compact plots).
 # ---------------------------------------------------------------------------
 
@@ -269,6 +430,361 @@ def save_bar_png(
         _draw_text_vertical(canvas, ylabel, 8, mt + plot_h // 2 + len(ylabel) * 3, color=(70, 70, 70), scale=1)
 
     return save_png(path, canvas)
+
+
+def save_heatmap_png(
+    path: str | Path,
+    data: np.ndarray,
+    *,
+    cmap: str = "viridis",
+    xlabel: str = "",
+    ylabel: str = "",
+    xticklabels: list[str] | None = None,
+    yticklabels: list[str] | None = None,
+    size: tuple[int, int] = (720, 420),
+    add_colorbar: bool = True,
+    title: str = "",
+) -> Path:
+    """Save a 2D array as a pseudocolour heatmap with labelled axes and colour bar.
+
+    Mimics pyxem's correlation-heatmap panel from
+    ``OrientationMap.plot_over_signal(..., add_ipf_correlation_heatmap=True)``.
+    """
+    arr = np.asarray(data, dtype=np.float64)
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 2D array, got shape {arr.shape!r}.")
+    n_rows, n_cols = arr.shape
+    width, height = size
+    canvas = np.full((height, width, 3), 255, dtype=np.uint8)
+    ml, mr, mt, mb = _TIGHT_MARGIN_L, _TIGHT_MARGIN_R, _TIGHT_MARGIN_T, _TIGHT_MARGIN_B
+    # Reserve space for colorbar on the right.
+    cbar_w = 28 if add_colorbar else 0
+    cbar_gap = 10 if add_colorbar else 0
+    plot_w = width - ml - mr - cbar_w - cbar_gap
+    plot_h = height - mt - mb
+    x0, x1 = ml, ml + plot_w
+    y0, y1 = mt, mt + plot_h
+
+    # --- Draw the heatmap image -----------------------------------------------
+    finite = arr[np.isfinite(arr)]
+    vmin = float(np.min(finite)) if finite.size else 0.0
+    vmax = float(np.max(finite)) if finite.size else 1.0
+    if vmax <= vmin:
+        vmax = vmin + 1.0
+    norm = (arr - vmin) / (vmax - vmin)
+    scaled = np.clip(norm * 255, 0, 255).astype(np.uint8)
+    lut = _get_colormap(cmap)
+    heatmap = lut[scaled]
+    # Resample heatmap to fit the plot area via nearest-neighbour.
+    sy = np.linspace(0, n_rows - 1, plot_h).astype(np.int32)
+    sx = np.linspace(0, n_cols - 1, plot_w).astype(np.int32)
+    canvas[y0:y1, x0:x1] = heatmap[sy[:, None], sx[None, :]]
+
+    # --- Draw axes and tick labels --------------------------------------------
+    # Left axis.
+    canvas[y0:y1 + 1, x0] = 30
+    # Bottom axis.
+    canvas[y1, x0:x1 + 1] = 30
+    # Top axis (thin).
+    canvas[y0, x0:x1 + 1] = 180
+    # Right axis (thin).
+    canvas[y0:y1 + 1, x1] = 180
+
+    # X tick labels.
+    if xticklabels:
+        n_xticks = len(xticklabels)
+        for i, label in enumerate(xticklabels):
+            tx = int(x0 + (i + 0.5) / n_xticks * plot_w)
+            canvas[y1 + 2:y1 + 4, tx] = 60
+            _draw_text(canvas, str(label)[:6], tx - len(str(label)[:6]) * 3, y1 + 6, color=(60, 60, 60), scale=1)
+    elif n_cols <= 20:
+        for i in range(n_cols):
+            tx = int(x0 + (i + 0.5) / n_cols * plot_w)
+            canvas[y1 + 2:y1 + 4, tx] = 60
+
+    # Y tick labels.
+    if yticklabels:
+        n_yticks = len(yticklabels)
+        for i, label in enumerate(yticklabels):
+            ty = int(y0 + (i + 0.5) / n_yticks * plot_h)
+            canvas[ty, x0 - 4:x0 - 2] = 60
+            _draw_text(canvas, str(label)[:8], x0 - 8 - len(str(label)[:8]) * 6, ty - 3, color=(60, 60, 60), scale=1)
+    elif n_rows <= 20:
+        for i in range(n_rows):
+            ty = int(y0 + (i + 0.5) / n_rows * plot_h)
+            canvas[ty, x0 - 4:x0 - 2] = 60
+
+    # Axis labels.
+    if xlabel:
+        _draw_text(canvas, xlabel, x0 + plot_w // 2 - len(xlabel) * 3, height - mb + 8, color=(70, 70, 70), scale=1)
+    if ylabel:
+        _draw_text_vertical(canvas, ylabel, 8, mt + plot_h // 2 + len(ylabel) * 3, color=(70, 70, 70), scale=1)
+    if title:
+        _draw_text(canvas, title.upper(), x0 + plot_w // 2 - len(title) * 3, 6, color=(30, 30, 30), scale=1)
+
+    # --- Colour bar strip -----------------------------------------------------
+    if add_colorbar:
+        cb_x0 = x1 + cbar_gap
+        cb_x1 = cb_x0 + cbar_w
+        # Gradient from vmin (bottom) to vmax (top).
+        cb_h = plot_h
+        gradient = np.linspace(255, 0, cb_h, dtype=np.uint8)  # bottom=0→vmin, top=255→vmax
+        cb = lut[gradient]
+        canvas[y0:y1, cb_x0:cb_x1] = cb[:, None, :]
+        # Border.
+        canvas[y0:y1 + 1, cb_x0] = 30
+        canvas[y0:y1 + 1, cb_x1] = 30
+        canvas[y0, cb_x0:cb_x1 + 1] = 30
+        canvas[y1, cb_x0:cb_x1 + 1] = 30
+        # Tick labels on colorbar.
+        for frac, lbl in [(0.0, f"{vmin:.2g}"), (0.5, f"{(vmin+vmax)/2:.2g}"), (1.0, f"{vmax:.2g}")]:
+            cy = int(y1 - frac * cb_h)
+            canvas[cy, cb_x1 + 1:cb_x1 + 5] = 60
+            _draw_text(canvas, lbl, cb_x1 + 7, cy - 3, color=(60, 60, 60), scale=1)
+
+    return save_png(path, canvas)
+
+
+def save_colorbar_png(
+    path: str | Path,
+    cmap: str = "viridis",
+    *,
+    vmin: float = 0.0,
+    vmax: float = 1.0,
+    label: str = "",
+    orientation: str = "vertical",
+    size: tuple[int, int] = (28, 256),
+) -> Path:
+    """Save a standalone colour-bar strip as a PNG.
+
+    Useful as a companion to unadorned ``save_png`` images that need a scale
+    reference, or embedded alongside figures.
+    """
+    w, h = int(size[0]), int(size[1])
+    canvas = np.full((h, w, 3), 255, dtype=np.uint8)
+    lut = _get_colormap(cmap)
+
+    if orientation == "vertical":
+        gradient = np.linspace(255, 0, h, dtype=np.uint8)
+        bar = lut[gradient]
+        canvas[:, 2:w - 2] = bar[:, None, :]
+        canvas[:, 0:2] = 30
+        canvas[:, w - 2:w] = 30
+        canvas[0, :] = 30
+        canvas[-1, :] = 30
+        # Tick labels.
+        for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+            y = int(h - 1 - frac * (h - 1))
+            canvas[y, w - 2:w + 6] = 60
+            val = vmin + frac * (vmax - vmin)
+            _draw_text(canvas, f"{val:.2g}", w + 8, y - 3, color=(60, 60, 60), scale=1)
+        if label:
+            _draw_text_vertical(canvas, label, 6, h // 2 + len(label) * 3, color=(30, 30, 30), scale=1)
+    else:
+        gradient = np.linspace(0, 255, w, dtype=np.uint8)
+        bar = lut[gradient]
+        canvas[2:h - 2, :] = bar[None, :, :]
+        canvas[0:2, :] = 30
+        canvas[h - 2:h, :] = 30
+        canvas[:, 0] = 30
+        canvas[:, -1] = 30
+        for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+            x = int(frac * (w - 1))
+            canvas[h - 2:h + 6, x] = 60
+            val = vmin + frac * (vmax - vmin)
+            _draw_text(canvas, f"{val:.2g}", x - 8, h + 8, color=(60, 60, 60), scale=1)
+        if label:
+            _draw_text(canvas, label, w // 2 - len(label) * 3, 6, color=(30, 30, 30), scale=1)
+
+    return save_png(path, canvas)
+
+
+def save_overlay_figure(
+    path: str | Path,
+    signal_image: np.ndarray,
+    overlays: list[dict[str, Any]],
+    *,
+    side_panels: list[dict[str, Any]] | None = None,
+    cmap: str = "viridis",
+    percentiles: tuple[float, float] = (1, 99),
+    center_mask_radius: float = 0.0,
+    size: tuple[int, int] = (960, 420),
+    panel_gap: int = 8,
+    title: str = "",
+) -> Path:
+    """Composite a multi-panel figure: signal + overlays + optional side panels.
+
+    Mimics pyxem's ``OrientationMap.plot_over_signal()`` layout: the main
+    diffraction-pattern panel on the left, with optional side panels (e.g.
+    correlation heatmap, IPF legend, phase legend) arranged to the right.
+
+    Parameters
+    ----------
+    path:
+        Output PNG path.
+    signal_image:
+        2D scalar image for the main panel.
+    overlays:
+        List of overlay dicts.  Each dict has keys:
+        - ``positions_yx`` — (M, 2) array of marker centres in *(y, x)* pixels.
+        - ``colors`` — (M, 3) uint8 RGB array, one colour per marker.
+        - ``marker`` — ``"cross"`` (default) or ``"circle"``.
+        - ``radius`` — marker size in pixels (default 3).
+    side_panels:
+        Optional list of panel dicts placed to the right of the signal.  Each
+        dict has:
+        - ``image`` — 2D array or (H, W, 3) uint8 RGB for the panel.
+        - ``title`` — optional caption below the panel.
+        - ``width`` — panel width in pixels.
+        - ``cmap`` — colormap for 2D images (default ``"viridis"``).
+    cmap:
+        Colormap for the signal image.
+    percentiles:
+        Contrast stretch percentiles for the signal image.
+    center_mask_radius:
+        If > 0, apply direct-beam masking to the signal image before rendering.
+    size:
+        Canvas ``(width, height)`` in pixels.
+    panel_gap:
+        Gap in pixels between the main panel and side panels.
+    title:
+        Optional title drawn at the top of the figure.
+    """
+    width, height = size
+    canvas = np.full((height, width, 3), 255, dtype=np.uint8)
+    ml, mr, mt, mb = _TIGHT_MARGIN_L, _TIGHT_MARGIN_R, _TIGHT_MARGIN_T, _TIGHT_MARGIN_B
+
+    # --- Compute panel layout -------------------------------------------------
+    n_side = len(side_panels) if side_panels else 0
+    side_total_w = 0
+    if side_panels:
+        for sp in side_panels:
+            side_total_w += int(sp.get("width", 128)) + panel_gap
+        side_total_w -= panel_gap  # remove trailing gap
+
+    main_w = width - ml - mr - (side_total_w + panel_gap if n_side > 0 else 0)
+    main_h = height - mt - mb
+
+    # --- Main panel: signal + overlays ----------------------------------------
+    sig = np.asarray(signal_image, dtype=np.float32)
+    if center_mask_radius > 0:
+        sig = mask_center_for_display(sig, radius_px=center_mask_radius)
+    scaled = _scale_to_uint8(sig, percentiles)
+    lut = _get_colormap(cmap)
+    main_rgb = lut[scaled]
+    # Resample to fit.
+    sh, sw = main_rgb.shape[:2]
+    sy = np.linspace(0, sh - 1, main_h).astype(np.int32)
+    sx = np.linspace(0, sw - 1, main_w).astype(np.int32)
+    canvas[mt:mt + main_h, ml:ml + main_w] = main_rgb[sy[:, None], sx[None, :]]
+
+    # Draw overlays on the main panel.
+    for ov in overlays:
+        positions = np.asarray(ov.get("positions_yx", np.zeros((0, 2))), dtype=np.float64)
+        colors = np.asarray(ov.get("colors", np.zeros((0, 3))), dtype=np.uint8)
+        marker = ov.get("marker", "cross")
+        radius = int(ov.get("radius", 3))
+        if positions.size == 0 or colors.size == 0:
+            continue
+        # Scale positions from signal-image coords to main-panel coords.
+        sy_scale = main_h / max(float(sh), 1.0)
+        sx_scale = main_w / max(float(sw), 1.0)
+        for i in range(min(len(positions), len(colors))):
+            py = int(positions[i, 0] * sy_scale) + mt
+            px = int(positions[i, 1] * sx_scale) + ml
+            color = tuple(int(c) for c in colors[i])
+            if marker == "circle":
+                _draw_circle(canvas, py, px, color, radius=radius)
+            else:
+                _draw_cross(canvas, py, px, color, radius=radius)
+
+    # --- Side panels ----------------------------------------------------------
+    if side_panels:
+        sx_cursor = ml + main_w + panel_gap
+        for sp in side_panels:
+            sp_w = int(sp.get("width", 128))
+            sp_img = np.asarray(sp.get("image", np.zeros((1, 1))))
+            sp_title = str(sp.get("title", ""))
+            sp_cmap = sp.get("cmap", "viridis")
+
+            if sp_img.ndim == 2:
+                sp_lut = _get_colormap(sp_cmap)
+                sp_scaled = _scale_to_uint8(sp_img, (0, 100))
+                sp_rgb = sp_lut[sp_scaled]
+            else:
+                sp_rgb = sp_img.astype(np.uint8, copy=False) if sp_img.dtype == np.uint8 else _scale_to_uint8(sp_img, (0, 100))
+
+            # Resample to fit.
+            sph, spw = sp_rgb.shape[:2]
+            target_h = main_h
+            target_w = sp_w
+            spy = np.linspace(0, sph - 1, target_h).astype(np.int32)
+            spx = np.linspace(0, spw - 1, target_w).astype(np.int32)
+            canvas[mt:mt + target_h, sx_cursor:sx_cursor + target_w] = sp_rgb[spy[:, None], spx[None, :]]
+            # Border.
+            canvas[mt:mt + target_h + 1, sx_cursor] = 180
+            canvas[mt:mt + target_h + 1, sx_cursor + target_w - 1] = 180
+            canvas[mt, sx_cursor:sx_cursor + target_w] = 180
+            canvas[mt + target_h - 1, sx_cursor:sx_cursor + target_w] = 180
+
+            if sp_title:
+                _draw_text(canvas, sp_title, sx_cursor + target_w // 2 - len(sp_title) * 3, mt + target_h + 6, color=(60, 60, 60), scale=1)
+
+            sx_cursor += target_w + panel_gap
+
+    # --- Title ----------------------------------------------------------------
+    if title:
+        _draw_text(canvas, title.upper(), width // 2 - len(title) * 3, 6, color=(30, 30, 30), scale=1)
+
+    return save_png(path, canvas)
+
+
+def _draw_cross(
+    canvas: np.ndarray,
+    y: float,
+    x: float,
+    color: tuple[int, int, int],
+    *,
+    radius: int = 4,
+) -> None:
+    """Draw a cross marker at *(y, x)* on *canvas*."""
+    h, w = canvas.shape[:2]
+    cy, cx = int(round(y)), int(round(x))
+    if cy < 0 or cy >= h or cx < 0 or cx >= w:
+        return
+    y0, y1 = max(0, cy - radius), min(h, cy + radius + 1)
+    x0, x1 = max(0, cx - radius), min(w, cx + radius + 1)
+    canvas[y0:y1, cx] = color
+    canvas[cy, x0:x1] = color
+    if radius >= 3:
+        for d in range(-radius + 1, radius):
+            yy, xx = cy + d, cx + d
+            if 0 <= yy < h and 0 <= xx < w:
+                canvas[yy, xx] = color
+            yy, xx = cy + d, cx - d
+            if 0 <= yy < h and 0 <= xx < w:
+                canvas[yy, xx] = color
+
+
+def _draw_circle(
+    canvas: np.ndarray,
+    y: float,
+    x: float,
+    color: tuple[int, int, int],
+    *,
+    radius: int = 3,
+) -> None:
+    """Draw a hollow circle marker at *(y, x)* on *canvas*."""
+    h, w = canvas.shape[:2]
+    cy, cx = int(round(y)), int(round(x))
+    r2 = radius * radius
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            d2 = dy * dy + dx * dx
+            if r2 - radius < d2 <= r2:
+                yy, xx = cy + dy, cx + dx
+                if 0 <= yy < h and 0 <= xx < w:
+                    canvas[yy, xx] = color
 
 
 def save_phase_match_map(
@@ -770,6 +1286,86 @@ def mask_center_for_display(
     if outer_radius_px is not None and outer_radius_px > 0:
         arr[r > outer_radius_px] = 0.0
     return arr
+
+
+def polar_reproject(
+    image: np.ndarray,
+    *,
+    npt: int = 100,
+    npt_azim: int = 360,
+    center_yx: tuple[float, float] | None = None,
+    mean: bool = True,
+) -> np.ndarray:
+    """Reproject a 2D Cartesian diffraction pattern to polar coordinates.
+
+    Pure-numpy equivalent of pyxem's
+    ``Diffraction2D.get_azimuthal_integral2d(npt, npt_azim, mean=True)``.
+    Uses fast ``np.bincount`` binning rather than interpolation, so it
+    handles masked/zeroed pixels correctly.
+
+    Parameters
+    ----------
+    image:
+        2D scalar diffraction pattern.
+    npt:
+        Number of radial bins (default 100).
+    npt_azim:
+        Number of azimuthal bins (default 360, one per degree).
+    center_yx:
+        Beam centre in *(y, x)* pixels.  Defaults to the geometric centre.
+    mean:
+        If True, return the *mean* pixel value in each bin (matching pyxem).
+        If False, return the sum.
+
+    Returns
+    -------
+    np.ndarray
+        ``(npt_azim, npt)`` float32 array.  Each row is an azimuthal slice
+        at constant angle; each column is a radial bin.
+    """
+    arr = np.asarray(image, dtype=np.float64)
+    h, w = arr.shape
+    cy, cx = center_yx if center_yx is not None else ((h - 1) / 2.0, (w - 1) / 2.0)
+
+    yy, xx = np.indices(arr.shape)
+    radii = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    angles = np.arctan2(yy - cy, xx - cx)  # [-π, π]
+    angles = np.where(angles < 0, angles + 2 * np.pi, angles)  # [0, 2π]
+
+    max_radius = float(np.max(radii))
+    if max_radius <= 0:
+        max_radius = 1.0
+
+    # Bin indices: radial [0, npt-1], azimuthal [0, npt_azim-1].
+    r_idx = np.clip((radii / max_radius * (npt - 1)).astype(np.int32), 0, npt - 1)
+    a_idx = np.clip((angles / (2 * np.pi) * (npt_azim - 1)).astype(np.int32), 0, npt_azim - 1)
+    flat_idx = a_idx * npt + r_idx  # (npt_azim, npt) in row-major
+
+    n_bins = npt_azim * npt
+    sums = np.bincount(flat_idx.ravel(), weights=np.nan_to_num(arr, nan=0.0).ravel(), minlength=n_bins)
+    counts = np.bincount(flat_idx.ravel(), minlength=n_bins)
+
+    polar = (sums / np.maximum(counts, 1)).astype(np.float32) if mean else sums.astype(np.float32)
+    return polar.reshape(npt_azim, npt)
+
+
+def apply_gamma(image: np.ndarray, gamma: float = 0.5) -> np.ndarray:
+    """Apply power-law gamma correction to a diffraction pattern.
+
+    ``gamma < 1`` boosts weak high-angle features at the expense of the
+    bright direct beam — matching pyxem's ``polar_multi**0.5`` pattern.
+    ``gamma > 1`` compresses dynamic range.
+    ``gamma == 1`` is a no-op (returns a copy).
+
+    Handles negative or zero values safely by working on the absolute value
+    and preserving sign.
+    """
+    arr = np.asarray(image, dtype=np.float32)
+    if gamma == 1.0:
+        return arr.copy()
+    # Clip negative values to zero (physical diffraction intensities are >= 0).
+    pos = np.maximum(arr, 0.0)
+    return np.where(arr >= 0, pos ** gamma, arr).astype(np.float32)
 
 
 def _write_rgb_png(path: Path, rgb: np.ndarray) -> None:

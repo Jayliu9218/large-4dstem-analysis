@@ -8,6 +8,7 @@ preview, etc.).
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -15,6 +16,80 @@ from typing import Any, Literal
 AxisOrder = Literal["nav_y_nav_x_q_y_q_x"]
 BBoxOrder = Literal["y0_y1_x0_x1"]
 CenterOrder = Literal["y_x"]
+
+
+@dataclass(frozen=True, slots=True)
+class DiffractionCalibration:
+    """Beam centre and reciprocal-space calibration for a diffraction pattern.
+
+    Bundles the metadata that pyxem carries in ``signal.calibration`` so it
+    flows through the pipeline as a single, validated object rather than
+    scattered ``beam_center_yx`` tuples and config strings.
+
+    Attributes
+    ----------
+    beam_center_yx:
+        Direct-beam position in detector pixels, ``(cy, cx)`` order.
+    reciprocal_pixels_per_inv_angstrom:
+        Reciprocal-space scale in px/Å.  Computed from camera length,
+        wavelength, and pixel size when those are known; otherwise set
+        directly from calibration.
+    pixel_size_um:
+        Detector pixel size in µm (optional).
+    camera_length_mm:
+        Camera length in mm (optional).
+    accelerating_voltage_kv:
+        TEM accelerating voltage in kV (default 200).
+    """
+
+    beam_center_yx: tuple[float, float]
+    reciprocal_pixels_per_inv_angstrom: float | None = None
+    pixel_size_um: float | None = None
+    camera_length_mm: float | None = None
+    accelerating_voltage_kv: float = 200.0
+
+    @property
+    def center_y(self) -> float:
+        """Beam centre y-coordinate in detector pixels."""
+        return self.beam_center_yx[0]
+
+    @property
+    def center_x(self) -> float:
+        """Beam centre x-coordinate in detector pixels."""
+        return self.beam_center_yx[1]
+
+    @property
+    def wavelength_angstrom(self) -> float:
+        """Relativistically corrected electron wavelength in Å."""
+        kv = max(self.accelerating_voltage_kv, 0.1)
+        h = 6.62607015e-34
+        m_e = 9.10938356e-31
+        e = 1.602176634e-19
+        c = 2.99792458e8
+        V = kv * 1e3
+        denom = math.sqrt(2 * m_e * e * V * (1 + e * V / (2 * m_e * c * c)))
+        return float(h / denom * 1e10)  # metres → Å
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to a plain dict (suitable for JSON summaries)."""
+        return {
+            "beam_center_yx": list(self.beam_center_yx),
+            "reciprocal_pixels_per_inv_angstrom": self.reciprocal_pixels_per_inv_angstrom,
+            "pixel_size_um": self.pixel_size_um,
+            "camera_length_mm": self.camera_length_mm,
+            "accelerating_voltage_kv": self.accelerating_voltage_kv,
+        }
+
+    @classmethod
+    def from_stage2_geometry(cls, geometry: dict[str, Any]) -> "DiffractionCalibration":
+        """Build from the ``geometry`` dict in a Stage 2A/B summary."""
+        return cls(
+            beam_center_yx=(
+                float(geometry["beam_center_yx"][0]),
+                float(geometry["beam_center_yx"][1]),
+            ),
+            reciprocal_pixels_per_inv_angstrom=geometry.get("reciprocal_pixels_per_inv_angstrom"),
+        )
 
 
 def is_roi_ready_for_indexing(roi: dict[str, Any]) -> bool:

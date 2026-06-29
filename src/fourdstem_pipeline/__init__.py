@@ -1,8 +1,19 @@
 """Notebook-first 4D-STEM analysis helpers."""
 
 from .config import load_workflow_config, resolve_data_config, validate_workflow_config
-from .contracts import DataContract, Stage1Manifest, Stage1ManifestLoadError, is_roi_ready_for_indexing
+from .contracts import DataContract, DiffractionCalibration, Stage1Manifest, Stage1ManifestLoadError, is_roi_ready_for_indexing
 from .dataset import DatasetHandle
+from .diffraction import DiffractionSignal, OrientationMap, PolarSignal
+from .export import (
+    apply_gamma,
+    apply_ipf_colors,
+    mask_center_for_display,
+    polar_reproject,
+    save_colorbar_png,
+    save_heatmap_png,
+    save_ipf_legend,
+    save_overlay_figure,
+)
 from .fingerprints import FingerprintResult, compute_radial_fingerprints
 from .indexing import IndexingCandidate, ROIIndexingResult, run_stage2_indexing
 from .loaders import load_dataset
@@ -21,10 +32,14 @@ from .workflow import WorkflowResult, run_workflow
 __all__ = [
     "DataContract",
     "DatasetHandle",
+    "DiffractionCalibration",
+    "DiffractionSignal",
     "FingerprintResult",
     "IndexingCandidate",
+    "OrientationMap",
     "OrientationResult",
     "PhaseScreeningResult",
+    "PolarSignal",
     "PreprocessedArray",
     "PreprocessSpec",
     "ROIBraggResult",
@@ -34,6 +49,8 @@ __all__ = [
     "Stage2Result",
     "VirtualImageResult",
     "WorkflowResult",
+    "apply_gamma",
+    "apply_ipf_colors",
     "apply_preprocess",
     "build_annular_masks",
     "compute_radial_fingerprints",
@@ -46,6 +63,8 @@ __all__ = [
     "load_stage1_manifest",
     "load_workflow_config",
     "make_synthetic_4dstem",
+    "mask_center_for_display",
+    "polar_reproject",
     "resolve_data_config",
     "run_orientation_preview",
     "run_roi_bragg_for_rois",
@@ -53,6 +72,10 @@ __all__ = [
     "run_stage2",
     "run_stage2_indexing",
     "run_workflow",
+    "save_colorbar_png",
+    "save_heatmap_png",
+    "save_ipf_legend",
+    "save_overlay_figure",
     "screen_phases",
     "validate_workflow_config",
 ]

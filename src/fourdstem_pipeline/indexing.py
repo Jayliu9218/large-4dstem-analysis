@@ -21,9 +21,11 @@ import yaml
 
 from .contracts import is_roi_ready_for_indexing
 from .export import (
+    apply_ipf_colors,
     mask_center_for_display,
     save_bar_png,
     save_cluster_phase_map,
+    save_ipf_legend,
     save_phase_match_map,
     save_png,
 )
@@ -1232,15 +1234,247 @@ def _save_match_visuals(
                 template_idx=int(best["template_idx"]),
             )
 
-        # Correlation vs angle bar chart
+        # --- IPF-coloured orientation overlay + legend (pyxem-style) ---------
+        _save_ipf_orientation_overlay(
+            roi_dir / "ipf_orientation_overlay.png",
+            mean_dp=mean_dp,
+            best=best,
+        )
+
+        # Correlation vs angle bar chart + heatmap
         scores_arr = np.asarray(best["all_scores"], dtype=np.float32)
         if scores_arr.size > 0:
             save_bar_png(
                 roi_dir / "correlation_vs_angle.png",
                 scores_arr.reshape(1, -1),
+                xlabel="orientation index",
+                ylabel="correlation",
             )
+            # Build a 2D heatmap: orientations × 1, or multi-zone-axis rows.
+            _save_correlation_heatmap(
+                roi_dir / "correlation_heatmap.png",
+                best,
+            )
+
+        # --- Multi-panel overlay figure (pyxem-style plot_over_signal) --------
+        _save_multi_panel_match_figure(
+            roi_dir / "template_match_figure.png",
+            mean_dp=mean_dp,
+            best=best,
+            roi={"name": roi_name, "bragg_summary_path": bragg_summary_path},
+        )
     except Exception:
         pass
+
+
+def _save_ipf_orientation_overlay(
+    path: Path,
+    *,
+    mean_dp: np.ndarray,
+    best: dict[str, Any],
+) -> None:
+    """Save an IPF-coloured orientation overlay on the mean diffraction pattern.
+
+    Mimics pyxem's ``OrientationMap.plot_over_signal()``: the best-matching
+    template peaks are coloured by their zone-axis direction using the cubic
+    IPF convention, and the zone axis is marked with an IPF-coloured cross.
+    An IPF legend is saved alongside.
+    """
+    try:
+        metadata = best.get("metadata")
+        if not isinstance(metadata, dict):
+            return
+        zone_axis = best.get("zone_axis")
+        if zone_axis is None:
+            return
+
+        # Render the mean DP as a viridis base.
+        base = np.asarray(mean_dp, dtype=np.float32)
+        canvas = _gray_rgb(mask_center_for_display(base, radius_px=35.0), cmap="viridis")
+
+        # Colour template peak markers by their hkl direction via IPF.
+        template_idx = int(best["template_idx"])
+        tmpl_peaks = _reconstruct_template_peak_positions(metadata, template_idx)
+        if tmpl_peaks is not None and len(tmpl_peaks) > 0:
+            # Get the hkls for this template.
+            zi = int(metadata.get("zone_axis_index", [0] * len(metadata.get("orientations_deg", [])))[template_idx]) if template_idx < len(metadata.get("zone_axis_index", [0])) else 0
+            per_zone_hkls = metadata.get("per_zone_hkls")
+            if per_zone_hkls is not None and zi < len(per_zone_hkls):
+                hkls = np.asarray(per_zone_hkls[zi], dtype=np.float64)
+                # Scale to display and apply IPF colours.
+                dst_shape = tuple(int(v) for v in mean_dp.shape)
+                src_shape = tuple(int(v) for v in metadata.get("sig_shape", dst_shape))
+                display_peaks = _scale_points(tmpl_peaks, src_shape, dst_shape)
+                ipf_rgb = apply_ipf_colors(hkls / np.maximum(np.linalg.norm(hkls, axis=1, keepdims=True), 1e-12))
+                for i in range(min(len(display_peaks), len(ipf_rgb))):
+                    py, px = float(display_peaks[i, 0]), float(display_peaks[i, 1])
+                    color = tuple(int(c) for c in ipf_rgb[i])
+                    _draw_cross(canvas, py, px, color, radius=3)
+
+        # Mark the zone axis direction with a larger IPF-coloured cross at centre.
+        za = np.asarray(zone_axis, dtype=np.float64).reshape(1, 3)
+        za = za / np.maximum(np.linalg.norm(za), 1e-12)
+        za_color = tuple(int(c) for c in apply_ipf_colors(za)[0])
+        cy, cx = float(canvas.shape[0] - 1) / 2.0, float(canvas.shape[1] - 1) / 2.0
+        _draw_cross(canvas, cy, cx, za_color, radius=6)
+
+        save_png(path, canvas)
+
+        # Save companion IPF legend.
+        legend_path = path.with_stem(path.stem + "_legend")
+        save_ipf_legend(legend_path, label="CUBIC IPF")
+    except Exception:
+        pass
+
+
+def _save_correlation_heatmap(
+    path: Path,
+    best: dict[str, Any],
+) -> None:
+    """Save a 2D correlation heatmap (orientations × zone-axes) for the match.
+
+    When multiple zone axes were searched, rows represent zone axes and columns
+    represent in-plane orientations, giving an at-a-glance view of the
+    correlation landscape — analogous to pyxem's
+    ``add_ipf_correlation_heatmap=True`` panel.
+    """
+    try:
+        from .export import save_heatmap_png
+        metadata = best.get("metadata")
+        if not isinstance(metadata, dict):
+            return
+        all_scores = np.asarray(best.get("all_scores", []), dtype=np.float64)
+        if all_scores.size == 0:
+            return
+        zone_axis_index = metadata.get("zone_axis_index", [])
+        orientations = metadata.get("orientations_deg", [])
+        zone_axes = metadata.get("zone_axes", [])
+        if len(zone_axis_index) != len(all_scores) or len(orientations) != len(all_scores):
+            # Fall back to 1×N heatmap.
+            heatmap_data = all_scores.reshape(1, -1)
+            yticklabels = None
+        else:
+            # Pivot into (n_zone_axes, n_orientations_per_zone) matrix.
+            indices = np.asarray(zone_axis_index, dtype=np.int32)
+            n_za = int(indices.max()) + 1 if indices.size > 0 else 1
+            # Assume each zone axis has the same number of orientations.
+            per_za = int(np.sum(indices == 0)) if n_za > 0 and np.any(indices == 0) else len(all_scores) // max(n_za, 1)
+            if per_za == 0:
+                per_za = len(all_scores) // max(n_za, 1)
+            heatmap_data = np.full((n_za, per_za), np.nan, dtype=np.float64)
+            for za_idx in range(n_za):
+                mask = indices == za_idx
+                row_scores = all_scores[mask]
+                heatmap_data[za_idx, :len(row_scores)] = row_scores
+            yticklabels = [f"ZA {tuple(zone_axes[i])}" if i < len(zone_axes) else f"ZA {i}" for i in range(n_za)]
+
+        save_heatmap_png(
+            path,
+            heatmap_data,
+            cmap="viridis",
+            xlabel="orientation",
+            ylabel="zone axis",
+            title="correlation landscape",
+            add_colorbar=True,
+        )
+    except Exception:
+        pass
+
+
+def _save_multi_panel_match_figure(
+    path: Path,
+    *,
+    mean_dp: np.ndarray,
+    best: dict[str, Any],
+    roi: dict[str, Any],
+) -> None:
+    """Composite a pyxem-style multi-panel figure for the template match.
+
+    Layout: (left) mean DP + colour-coded peak markers,
+    (right) side panels for IPF legend and correlation heatmap.
+    """
+    try:
+        from .export import save_overlay_figure
+
+        metadata = best.get("metadata")
+        if not isinstance(metadata, dict):
+            return
+
+        tmpl_idx = int(best["template_idx"])
+        tmpl_peaks = _reconstruct_template_peak_positions(metadata, tmpl_idx)
+        dst_shape = tuple(int(v) for v in mean_dp.shape)
+        src_shape = tuple(int(v) for v in metadata.get("sig_shape", dst_shape))
+
+        # --- Build overlays for the main panel ---------------------------------
+        overlays: list[dict[str, Any]] = []
+        if tmpl_peaks is not None and len(tmpl_peaks) > 0:
+            display_peaks = _scale_points(tmpl_peaks, src_shape, dst_shape)
+            zi = int(metadata.get("zone_axis_index", [0])[tmpl_idx] if tmpl_idx < len(metadata.get("zone_axis_index", [0])) else 0)
+            hkls = None
+            per_zone_hkls = metadata.get("per_zone_hkls")
+            if per_zone_hkls is not None and zi < len(per_zone_hkls):
+                hkls = np.asarray(per_zone_hkls[zi], dtype=np.float64)
+            if hkls is not None and len(hkls) > 0:
+                norms = np.maximum(np.linalg.norm(hkls, axis=1, keepdims=True), 1e-12)
+                ipf_rgb = apply_ipf_colors(hkls / norms)
+                overlays.append({
+                    "positions_yx": display_peaks,
+                    "colors": ipf_rgb,
+                    "marker": "cross",
+                    "radius": 4,
+                })
+
+        # Also overlay measured peaks.
+        measured = _load_measured_peak_positions_for_display(roi, mean_dp)
+        if measured.size > 0:
+            n_meas = len(measured)
+            overlays.append({
+                "positions_yx": measured,
+                "colors": np.tile(np.asarray([20, 230, 80], dtype=np.uint8), (n_meas, 1)),
+                "marker": "circle",
+                "radius": 5,
+            })
+
+        # --- Build side panels -------------------------------------------------
+        side_panels: list[dict[str, Any]] = []
+        # IPF legend.
+        side_panels.append({
+            "image": _ipf_legend_image(128),
+            "title": "CUBIC IPF",
+            "width": 128,
+        })
+
+        # Correlation bar strip.
+        scores = np.asarray(best.get("all_scores", []), dtype=np.float64)
+        if scores.size > 0:
+            heatmap_2d = scores.reshape(-1, 1) if scores.ndim == 1 else scores
+            side_panels.append({
+                "image": heatmap_2d,
+                "title": "correlation",
+                "width": 64,
+                "cmap": "viridis",
+            })
+
+        save_overlay_figure(
+            path,
+            mean_dp,
+            overlays,
+            side_panels=side_panels,
+            cmap="viridis",
+            center_mask_radius=35.0,
+            title=f"template match: {roi.get('name', 'unknown')}",
+        )
+    except Exception:
+        pass
+
+
+def _ipf_legend_image(size: int = 128) -> np.ndarray:
+    """Return a square RGB image of the cubic IPF stereographic triangle."""
+    from .export import _CUBIC_IPF_LUT as ipf_lut
+    h, w = ipf_lut.shape[:2]
+    sy = np.linspace(0, h - 1, size).astype(np.int32)
+    sx = np.linspace(0, w - 1, size).astype(np.int32)
+    return ipf_lut[sy[:, None], sx[None, :]]
 
 
 def _mock_score_roi_against_candidates(
