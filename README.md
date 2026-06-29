@@ -318,6 +318,11 @@ python -m fourdstem_pipeline.cli bin-export `
     --output "data/binned.h5" `
     --r-bin 4 --q-bin 2 --scan-shape 512 512
 
+python -m fourdstem_pipeline.cli bin-export `
+    --input "data/0617-4d/1_512x512_ss15.63nm_0.55ms_c2 50um_CL91mm_0.75mrad_spot7_0.022nA_GL3_mag12500k_12b 0913.mib" `
+    --output "data/0617-4d/1_R2Q2.h5" `
+    --r-bin 2 --q-bin 2 --scan-shape 512 512
+
 # Already-binned H5: further Q_bin only
 python -m fourdstem_pipeline.cli bin-export `
     --input "data/binned.h5" `
@@ -346,9 +351,8 @@ python -m fourdstem_pipeline.cli crop-export `
     --input "data/scan.mib" `
     --output "data/cropped.h5" `
     --nav-crop 0 64 0 64 --scan-shape 512 512
-```
 
-```powershell
+# specified path
 python -m fourdstem_pipeline.cli crop-export `
     --input "data/0617-4d/1_512x512_ss15.63nm_0.55ms_c2 50um_CL91mm_0.75mrad_spot7_0.022nA_GL3_mag12500k_12b 0913.mib" `
     --output "data/0617-4d/1_0_64_0_64.h5" `

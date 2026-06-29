@@ -1,7 +1,7 @@
-# Stage 2A: ROI Bragg Detection — 1_R4Q2_crop64 (64×64×256×256 cropped)
+# Stage 2A: ROI Bragg Detection — 1_0_64_0_64 (64×64×256×256 cropped)
 # ====================================================================
 
-stage1_dir: outputs/1_R4Q2_crop64
+stage1_dir: outputs/1_0_64_0_64
 
 data_path: data/0617-4d/1_0_64_0_64.h5
 

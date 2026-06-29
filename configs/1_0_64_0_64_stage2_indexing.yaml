@@ -1,7 +1,7 @@
-# Stage 2B: Phase Indexing — 1_R4Q2_crop64 (Ti-bcc / Ti-hcp only)
+# Stage 2B: Phase Indexing — 1_0_64_0_64 (Ti-bcc / Ti-hcp only)
 # =================================================================
 
-stage2_dir: outputs/1_R4Q2_crop64/stage2/roi_bragg
+stage2_dir: outputs/1_0_64_0_64/stage2/roi_bragg
 
 output_dir: null
 

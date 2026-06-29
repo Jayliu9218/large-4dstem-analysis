@@ -1,12 +1,12 @@
 project:
-  name: 1_R4Q2_crop64_screening
-  output_dir: outputs/1_R4Q2_crop64
+  name: 1_0_64_0_64_screening
+  output_dir: outputs/1_0_64_0_64
 
 data:
   path: data/0617-4d/1_0_64_0_64.h5
   lazy: false
   backend: h5py
-  cache: outputs/cache/1_R4Q2_crop64
+  cache: outputs/cache/1_0_64_0_64
   chunks:
     navigation: [16, 16]
     signal: [128, 128]
