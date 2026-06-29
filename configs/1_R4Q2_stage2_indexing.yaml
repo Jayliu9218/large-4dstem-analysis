@@ -1,0 +1,37 @@
+# Stage 2B: Phase Indexing — 1_R4Q2 (Ti-bcc / Ti-hcp only)
+# ===========================================================
+
+stage2_dir: outputs/1_R4Q2/stage2/roi_bragg
+
+output_dir: null
+
+template_generation:
+  max_index: 4
+  zone_axes:
+    - [0, 0, 1]
+    - [1, 0, 0]
+    - [1, 1, 0]
+    - [1, 1, 1]
+    - [1, 1, 2]
+  orientation_step_deg: 5
+  orientations_deg: null
+  peak_sigma_px: 5.0
+  reciprocal_pixels_per_inv_angstrom: null
+  intensity_power: 2.0
+
+matching:
+  top_k_per_phase: 5
+  radial_gate_enabled: true
+  radial_min_support: 0.25
+  phase_margin_threshold: 0.08
+  orientation_margin_threshold: 0.05
+
+candidate_cifs:
+  - name: Ti_bcc
+    phase: Ti-bcc
+    path: data/0617-4d/Ti-bcc.cif
+    space_group: 229
+  - name: Ti_hcp
+    phase: Ti-hcp
+    path: data/0617-4d/Ti-hcp.cif
+    space_group: 194
