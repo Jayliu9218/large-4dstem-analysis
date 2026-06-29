@@ -147,13 +147,17 @@ def _chunked_bin_R(datacube: Any, bin_factor: int) -> Any:
     out = np.zeros((out_nx, out_ny, q_nx, q_ny), dtype=np.uint16)
 
     for out_i in range(out_nx):
-        # Read one chunk: bin_factor input rows → all columns → full detector
+        # Read bin_factor nav-x rows × all nav-y columns × full detector.
+        # Shape: (bin_factor, crop_y=R_Ny, Q_Nx, Q_Ny)
         in_slice = np.asarray(
             src[out_i * bin_factor : (out_i + 1) * bin_factor, :crop_y, :, :],
             dtype=np.float32,
         )
-        # Mean over the bin_factor dimension → (crop_y, q_nx, q_ny) float32
-        row_mean = in_slice.mean(axis=0, dtype=np.float32)
+        # Reshape to pull apart the nav-y binning:
+        # (bin_factor, out_ny, bin_factor, Q_Nx, Q_Ny)
+        reshaped = in_slice.reshape(bin_factor, out_ny, bin_factor, q_nx, q_ny)
+        # Mean over both bin axes → (out_ny, Q_Nx, Q_Ny)
+        row_mean = reshaped.mean(axis=(0, 2), dtype=np.float32)
         out[out_i, :, :, :] = _to_uint16_intensity(row_mean)
 
     new_cube = py4DSTEM.io.datacube.DataCube(data=out)
