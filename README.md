@@ -348,6 +348,13 @@ python -m fourdstem_pipeline.cli crop-export `
     --nav-crop 0 64 0 64 --scan-shape 512 512
 ```
 
+```powershell
+python -m fourdstem_pipeline.cli crop-export `
+    --input "data/0617-4d/1_512x512_ss15.63nm_0.55ms_c2 50um_CL91mm_0.75mrad_spot7_0.022nA_GL3_mag12500k_12b 0913.mib" `
+    --output "data/0617-4d/1_0_64_0_64.h5" `
+    --nav-crop 0 64 0 64 --scan-shape 512 512
+```
+
 | Flag | Purpose |
 |------|---------|
 | `--input` | Raw data path |

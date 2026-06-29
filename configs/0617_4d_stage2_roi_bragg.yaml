@@ -7,7 +7,7 @@
 #   fourdstem-stage2 --config configs/stage2_roi_bragg.yaml
 
 # Path to the Stage-1 output directory containing stage1_summary.json.
-stage1_dir: outputs/0617_4d_stage1
+stage1_dir: outputs/0617_4d_1
 
 # Optional: explicit path to the original 4D-STEM data file.  When
 # omitted, the input_path recorded in provenance.json is used.

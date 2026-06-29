@@ -1,11 +1,11 @@
-# Stage 2B: Phase Indexing — 1_R4Q2 (Ti-bcc / Ti-hcp)
+# Stage 2B: Phase Indexing — 1_R4Q2_L (Ti-bcc / Ti-hcp)
 # ======================================================
 # Consumes accepted Stage 2A ROI Bragg outputs.  Generates analytic kinematic
 # templates for Ti-bcc and Ti-hcp, matches against ROI mean diffraction
 # patterns, and reports candidate phases with confidence tiers.
 
 # Stage 2A output directory containing stage2_summary.json.
-stage2_dir: outputs/1_R4Q2/stage2/roi_bragg
+stage2_dir: outputs/1_R4Q2_L/stage2/roi_bragg
 
 # Optional output directory. Defaults to <stage2_dir>/stage2b_indexing/.
 output_dir: null

@@ -10,7 +10,7 @@
 # definitive phase identification.
 
 # Stage 2A output directory containing stage2_summary.json.
-stage2_dir: outputs/0617_4d_stage1/stage2/roi_bragg
+stage2_dir: outputs/0617_4d_1/stage2/roi_bragg
 
 # Optional output directory. Defaults to <stage2_dir>/stage2b_indexing/.
 output_dir: null
@@ -70,23 +70,3 @@ candidate_cifs:
     path: data/0617-4d/Ti-bcc.cif
     space_group: 229
   # --- Negative controls (P0 validation) ---
-  - name: TiO2_rutile
-    phase: TiO2-rutile
-    path: data/0617-4d/TiO2_rutile.cif
-    space_group: 136
-  - name: Ni_fcc
-    phase: Ni-fcc
-    path: data/0617-4d/Ni_fcc.cif
-    space_group: 225
-  - name: Al_fcc
-    phase: Al-fcc
-    path: data/0617-4d/Al_fcc.cif
-    space_group: 225
-  - name: Fe_bcc
-    phase: Fe-bcc
-    path: data/0617-4d/Fe_bcc.cif
-    space_group: 229
-  - name: Ti_hcp_wrong_a
-    phase: Ti-hcp-wrong
-    path: data/0617-4d/Ti_hcp_wrong_a.cif
-    space_group: 194

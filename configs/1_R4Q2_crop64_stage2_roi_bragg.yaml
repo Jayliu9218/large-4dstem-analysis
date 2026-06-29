@@ -1,0 +1,36 @@
+# Stage 2A: ROI Bragg Detection — 1_R4Q2_crop64 (64×64×256×256 cropped)
+# ====================================================================
+
+stage1_dir: outputs/1_R4Q2_crop64
+
+data_path: data/0617-4d/1_0_64_0_64.h5
+
+output_dir: null
+
+roi_source: roi_candidates
+
+max_rois: null
+
+# -- Extraction parameters --
+thin_r: 1    # Keep all nav positions (already only 64×64)
+bin_q: 2     # 256→128 detector for Bragg detection
+
+mem: MEMMAP
+
+# Scan is already 64×64 in the H5 file (no raw MIB import needed).
+scan_shape: null
+
+# -- py4DSTEM Bragg-disk detection parameters --
+corr_power: 1.0
+sigma_cc: 1
+edge_boundary: 10
+min_relative_intensity: 0.10
+min_peak_spacing: 4
+subpixel: poly
+max_num_peaks: 70
+cuda: false
+
+# Central exclusion radius in binned detector pixels (after bin_q=2: 128→64).
+central_exclusion_radius: 20
+
+save_roi_data: true

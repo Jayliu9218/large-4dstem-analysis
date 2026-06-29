@@ -1,6 +1,6 @@
 project:
-  name: 0617_4d_mib_screening_rbin1
-  output_dir: outputs/0617_4d_rbin1
+  name: 0617_4d_1_fingerprint_class_screening
+  output_dir: outputs/0617_4d_1
 
 data:
   backend: hyperspy_pyxem
@@ -11,16 +11,15 @@ data:
   detector_shape: [256, 256]
   dtype: uint16
   lazy: true
-  cache: outputs/cache/0617_4d_rbin1
+  cache: outputs/cache/0617_4d_1
   chunks:
     navigation: [64, 64]
     signal: [112, 112]
 
 preprocess:
-  # Full navigation sampling: 512x512 scan -> 512x512 screening grid.
   q_crop: [16, 240, 16, 240]
   q_bin: 2
-  r_bin: 1
+  r_bin: 2
 
 geometry:
   center: null
@@ -49,7 +48,7 @@ phase_screening:
 
 orientation:
   preview_binning: [4, 4]
-  roi: [128, 384, 128, 384]
+  roi: [64, 192, 64, 192]
   confidence_threshold: 0.05
 
 roi_bragg:
