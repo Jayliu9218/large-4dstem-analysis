@@ -94,8 +94,16 @@ def connected_component_diagnostics(
             if size < 16:
                 for y, x in comp:
                     cleaned[y, x] = _majority_neighbor(labels, y, x)
+    keys = [
+        "cluster",
+        "component_count",
+        "largest_component_size",
+        "largest_component_fraction_within_class",
+        "median_component_size",
+        "small_component_count",
+    ]
     with (output_dir / "cluster_connected_components.csv").open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(fh, fieldnames=keys)
         writer.writeheader()
         writer.writerows(rows)
     np.save(output_dir / "cluster_cleaned_labels.npy", cleaned.astype(np.int16))
@@ -109,10 +117,13 @@ def connected_component_diagnostics(
             "fingerprint_class_labels_cleaned_npy": str(class_npy),
             "fingerprint_class_labels_cleaned_png": str(cleaned_png),
         }
-    save_bar_png(
-        png_dir / "cluster_area_histogram.png",
-        np.asarray([[row["largest_component_size"], row["component_count"]] for row in rows], dtype=np.float32),
+    hist_values = np.asarray(
+        [[row["largest_component_size"], row["component_count"]] for row in rows],
+        dtype=np.float32,
     )
+    if hist_values.size == 0:
+        hist_values = np.zeros((1, 2), dtype=np.float32)
+    save_bar_png(png_dir / "cluster_area_histogram.png", hist_values)
     base = images.get("adf") if "adf" in images else next(iter(images.values()))
     save_png(png_dir / "cluster_boundary_overlay_on_adf.png", _boundary_overlay(base, labels))
     return {
@@ -213,7 +224,15 @@ def roi_candidates(
     yaml_path = output_dir / "roi_candidates.yaml"
     csv_path = output_dir / "roi_candidates.csv"
     yaml_path.write_text(yaml.safe_dump({"rois": rois}, sort_keys=False), encoding="utf-8")
-    keys = sorted({key for roi in rois for key in roi})
+    keys = sorted({key for roi in rois for key in roi}) or [
+        "name",
+        "bbox",
+        "center",
+        "size",
+        "reason",
+        "recommended_stage2",
+        "cluster",
+    ]
     with csv_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=keys)
         writer.writeheader()

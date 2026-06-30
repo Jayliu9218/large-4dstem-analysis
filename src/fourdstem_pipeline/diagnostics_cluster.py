@@ -126,7 +126,15 @@ def _safe_ratio(num: Any, den: Any) -> float:
 
 
 def write_cluster_summary(output_dir: Path, rows: list[dict[str, float | int]]) -> None:
-    keys = sorted({key for row in rows for key in row})
+    keys = sorted({key for row in rows for key in row}) or [
+        "cluster",
+        "pixel_count",
+        "fraction",
+        "mean_COM_x",
+        "mean_COM_y",
+        "std_COM_x",
+        "std_COM_y",
+    ]
     with (output_dir / "cluster_summary.csv").open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=keys)
         writer.writeheader()
@@ -145,6 +153,8 @@ def _format_value(value: Any) -> str:
 
 def stats_bar_values(rows: list[dict[str, float | int]]) -> np.ndarray:
     keys = ["mean_BF", "mean_ADF", "mean_HAADF", "mean_ring_1", "mean_ring_2", "mean_ring_3"]
+    if not rows:
+        return np.zeros((1, len(keys)), dtype=np.float32)
     return np.asarray([[float(row.get(key, 0.0)) for key in keys] for row in rows], dtype=np.float32)
 
 
@@ -301,6 +311,8 @@ def normalisation_comparison(
     class_dir: Path,
     png_dir: Path,
 ) -> dict[str, str]:
+    if n_clusters < 1:
+        return {}
     matrix = profiles.reshape(-1, profiles.shape[-1]).astype(np.float32)
     variants = {
         "raw": matrix,
@@ -329,6 +341,26 @@ def k_sweep(
 ) -> dict[str, str]:
     matrix = profiles.reshape(-1, profiles.shape[-1]).astype(np.float32)
     matrix = matrix / np.maximum(matrix.max(axis=1, keepdims=True), 1e-12)
+    ks = [k for k in ks if 1 < int(k) < matrix.shape[0]]
+    if not ks:
+        keys = [
+            "k",
+            "silhouette",
+            "calinski_harabasz",
+            "davies_bouldin",
+            "cluster_size_fractions",
+            "spatial_fragmentation",
+        ]
+        csv_path = class_dir / "k_sweep_metrics.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=keys)
+            writer.writeheader()
+        save_lines_png(
+            png_dir / "k_sweep_metrics.png",
+            np.asarray([0], dtype=np.float32),
+            np.zeros((2, 1), dtype=np.float32),
+        )
+        return {"metrics_csv": str(csv_path), "metrics_png": str(png_dir / "k_sweep_metrics.png")}
     pca_dim = min(6, matrix.shape[1], matrix.shape[0])
     embedding = PCA(n_components=pca_dim, random_state=0).fit_transform(matrix)
     sample = _metric_sample(embedding)

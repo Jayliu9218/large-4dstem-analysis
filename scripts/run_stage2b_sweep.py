@@ -6,8 +6,8 @@ and reports which candidate phase wins for each ROI under each combination.
 
 Usage::
 
-    python scripts/run_stage2b_sweep.py --config configs/stage2_indexing.yaml
-    python scripts/run_stage2b_sweep.py --config configs/stage2_indexing.yaml \\
+    python scripts/run_stage2b_sweep.py --config configs/pipeline.yaml
+    python scripts/run_stage2b_sweep.py --config configs/pipeline.yaml \\
         --output-dir outputs/sweep --peak-sigma 3,4,5,6 --orient-step 5,2,1
 """
 
@@ -104,7 +104,7 @@ def run_sweep(
     """
     import yaml
 
-    base_cfg = yaml.safe_load(base_config_path.read_text(encoding="utf-8"))
+    base_cfg = _load_stage2b_sweep_config(base_config_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     combos = _grid_combinations(sweep_grid)
@@ -268,6 +268,26 @@ def _print_stability_report(
         print()
 
 
+def _load_stage2b_sweep_config(config_path: Path) -> dict[str, Any]:
+    """Load Stage 2B config, extracting it from unified pipeline YAML."""
+    import yaml
+
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if not isinstance(cfg, dict):
+        raise ValueError(f"Config must be a YAML mapping, got {type(cfg).__name__}.")
+    if "stage2b" not in cfg:
+        return cfg
+
+    stage2b = dict(cfg.get("stage2b") or {})
+    project_cfg = cfg.get("project") or {}
+    stage2a_cfg = cfg.get("stage2a") or {}
+    stage1_dir = Path(project_cfg.get("output_dir", "outputs"))
+    stage2a_dir = Path(stage2a_cfg.get("output_dir") or stage1_dir / "stage2" / "roi_bragg")
+    stage2b.setdefault("stage2_dir", str(stage2a_dir))
+    stage2b.setdefault("output_dir", None)
+    return stage2b
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Stage 2B parameter stability sweep",
@@ -275,8 +295,8 @@ def main() -> None:
         epilog=__doc__,
     )
     parser.add_argument(
-        "--config", default="configs/stage2_indexing.yaml",
-        help="Base Stage 2B config (default: configs/stage2_indexing.yaml)",
+        "--config", default="configs/pipeline.yaml",
+        help="Unified or Stage 2B config (default: configs/pipeline.yaml)",
     )
     parser.add_argument(
         "--output-dir", default=None,
@@ -327,8 +347,7 @@ def main() -> None:
     if args.output_dir:
         output_dir = Path(args.output_dir).resolve()
     else:
-        import yaml
-        base_cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        base_cfg = _load_stage2b_sweep_config(config_path)
         stage2_dir = Path(base_cfg["stage2_dir"])
         if not stage2_dir.is_absolute():
             stage2_dir = Path.cwd() / stage2_dir

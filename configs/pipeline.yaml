@@ -1,0 +1,126 @@
+# Unified 4D-STEM pipeline configuration.
+#
+# One command runs all enabled stages:
+#   fourdstem-pipeline --config configs/pipeline.yaml
+#
+# Single-stage debugging still works:
+#   fourdstem-run --config configs/pipeline.yaml
+#   fourdstem-stage2 --config configs/pipeline.yaml
+#   fourdstem-stage2b --config configs/pipeline.yaml
+
+pipeline:
+  stages: [stage1, stage2a, stage2b]
+  output_dir: outputs/0617_4d_1/pipeline
+
+project:
+  name: 0617_4d_1_full_pipeline
+  output_dir: outputs/0617_4d_1
+
+data:
+  backend: hyperspy_pyxem
+  directory: data/0617-4d
+  pattern: "*.mib"
+  index: 0
+  scan_shape: [512, 512]
+  detector_shape: [256, 256]
+  dtype: uint16
+  lazy: true
+  cache: outputs/cache/0617_4d_1
+  chunks:
+    navigation: [64, 64]
+    signal: [112, 112]
+
+preprocess:
+  q_crop: [16, 240, 16, 240]
+  q_bin: 2
+  r_bin: 2
+
+geometry:
+  center: null
+  radial_bins: 112
+
+virtual_images:
+  masks:
+    bf: {inner_radius: 0, outer_radius: 7}
+    adf: {inner_radius: 16, outer_radius: 44}
+    haadf: {inner_radius: 44, outer_radius: 78}
+    ring_1: {inner_radius: 9, outer_radius: 21}
+    ring_2: {inner_radius: 21, outer_radius: 40}
+    ring_3: {inner_radius: 40, outer_radius: 64}
+
+phase_screening:
+  n_components: 4
+  n_clusters: 4
+  method: pca_nmf_cluster
+  candidate_phases:
+    - name: Ti-bcc
+      cif: data/0617-4d/Ti-bcc.cif
+      reference_profile: null
+    - name: Ti-hcp
+      cif: data/0617-4d/Ti-hcp.cif
+      reference_profile: null
+
+orientation:
+  preview_binning: [4, 4]
+  roi: [64, 192, 64, 192]
+  confidence_threshold: 0.05
+
+sample_mask:
+  enabled: true
+  source: adf
+  method: percentile
+  percentile: 15
+  fill_holes: true
+  min_size: 100
+  background_label: -1
+
+stage2a:
+  data_path: null
+  output_dir: null
+  roi_source: roi_candidates
+  max_rois: null
+  thin_r: 2
+  bin_q: 2
+  mem: MEMMAP
+  scan_shape: null
+  corr_power: 1.0
+  sigma_cc: 1
+  edge_boundary: 10
+  min_relative_intensity: 0.10
+  min_peak_spacing: 4
+  subpixel: poly
+  max_num_peaks: 70
+  cuda: false
+  central_exclusion_radius: 30
+  save_roi_data: true
+
+stage2b:
+  output_dir: null
+  template_generation:
+    max_index: 4
+    zone_axes:
+      - [0, 0, 1]
+      - [1, 0, 0]
+      - [1, 1, 0]
+      - [1, 1, 1]
+      - [1, 1, 2]
+    orientation_step_deg: 5
+    orientations_deg: null
+    peak_sigma_px: 5.0
+    reciprocal_pixels_per_inv_angstrom: 55.9
+    intensity_power: 2.0
+  matching:
+    top_k_per_phase: 5
+    radial_gate_enabled: true
+    radial_min_support: 0.25
+    phase_margin_threshold: 0.08
+    orientation_margin_threshold: 0.05
+  candidate_cifs:
+    - name: Ti_hcp
+      phase: Ti-hcp
+      path: data/0617-4d/Ti-hcp.cif
+      space_group: 194
+    - name: Ti_bcc
+      phase: Ti-bcc
+      path: data/0617-4d/Ti-bcc.cif
+      space_group: 229

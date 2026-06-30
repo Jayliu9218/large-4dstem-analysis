@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from .config import load_workflow_config, resolve_data_config
 from .contracts import DataContract
 from .dataset import DatasetHandle
@@ -37,7 +39,7 @@ log = get_logger(__name__)
 @dataclass(slots=True)
 class WorkflowResult:
     output_dir: Path
-    dataset: DatasetHandle
+    dataset: DatasetHandle | None
     virtual_images: VirtualImageResult | None = None
     fingerprints: FingerprintResult | None = None
     phase_screening: PhaseScreeningResult | None = None
@@ -50,7 +52,7 @@ class WorkflowResult:
 
 
 def run_workflow(
-    config: str | Path | dict[str, Any] = "configs/default_workflow.yaml",
+    config: str | Path | dict[str, Any] = "configs/pipeline.yaml",
     *,
     log_level: str = "INFO",
 ) -> WorkflowResult:
@@ -89,20 +91,25 @@ def run_workflow(
 
     errors: list[dict[str, Any]] = []
 
-    dataset = _run_stage("load", lambda: load_dataset(
-        data_cfg.get("path", "synthetic://demo"),
-        lazy=bool(data_cfg.get("lazy", True)),
-        cache=data_cfg.get("cache"),
-        chunks=data_cfg.get("chunks"),
-        backend=data_cfg.get("backend"),
-        scan_shape=data_cfg.get("scan_shape"),
-        detector_shape=data_cfg.get("detector_shape"),
-        dtype=data_cfg.get("dtype"),
-        mib_header_bytes=data_cfg.get("mib_header_bytes"),
-    ))
+    dataset = _run_stage(
+        "load",
+        lambda: load_dataset(
+            data_cfg.get("path", "synthetic://demo"),
+            lazy=bool(data_cfg.get("lazy", True)),
+            cache=data_cfg.get("cache"),
+            chunks=data_cfg.get("chunks"),
+            backend=data_cfg.get("backend"),
+            scan_shape=data_cfg.get("scan_shape"),
+            detector_shape=data_cfg.get("detector_shape"),
+            dtype=data_cfg.get("dtype"),
+            mib_header_bytes=data_cfg.get("mib_header_bytes"),
+        ),
+        errors=errors,
+    )
 
     if dataset is None:
-        errors.append({"stage": "load", "error": "Data loading failed.", "elapsed_s": 0})
+        if not any(err.get("stage") == "load" for err in errors):
+            errors.append({"stage": "load", "error": "Data loading failed.", "elapsed_s": 0})
         return _make_error_result(output_dir, dataset, errors)
 
     log.info("  data backend:  %s", dataset.source_backend)
@@ -110,10 +117,16 @@ def run_workflow(
     log.info("  signal:        %s", dataset.signal_shape)
     log.info("  block shape:   %s", block_shape)
 
-    dataset = _run_stage("preprocess", lambda: apply_preprocess(dataset, **cfg.get("preprocess", {})))
+    dataset = _run_stage(
+        "preprocess",
+        lambda: apply_preprocess(dataset, **cfg.get("preprocess", {})),
+        errors=errors,
+    )
 
     if dataset is None:
         log.error("Preprocessing failed — cannot continue. Aborting workflow.")
+        if not any(err.get("stage") == "preprocess" for err in errors):
+            errors.append({"stage": "preprocess", "error": "Preprocessing failed.", "elapsed_s": 0})
         return _make_error_result(output_dir, dataset, errors)
 
     # ------------------------------------------------------------------
@@ -406,6 +419,12 @@ def run_workflow(
         "errors": errors if errors else None,
         "sample_mask": {
             "enabled": bool(sample_mask_cfg.get("enabled", False)),
+            "source": str(sample_mask_cfg.get("source", "adf")),
+            "method": str(sample_mask_cfg.get("method", "percentile")),
+            "percentile": float(sample_mask_cfg.get("percentile", 15)),
+            "fill_holes": bool(sample_mask_cfg.get("fill_holes", True)),
+            "min_size": int(sample_mask_cfg.get("min_size", 100)),
+            "background_label": int(sample_mask_cfg.get("background_label", -1)),
             "generated": sample_mask is not None,
             "sample_pixels": int(sample_mask.sum()) if sample_mask is not None else None,
             "background_pixels": int((~sample_mask).sum()) if sample_mask is not None else None,
@@ -435,6 +454,8 @@ def run_workflow(
         qc_result=qc_result,
         roi_bragg=roi_bragg,
     )
+    summary["outputs"]["roi_candidates"] = diagnostics.get("roi_candidates")
+    summary["outputs"]["diagnostics"] = diagnostics
 
     try:
         default_nav = dataset.navigation_shape if dataset else (1, 1)
@@ -546,6 +567,8 @@ def _save_stage1_outputs(
         _np.save(fingerprints_dir / "radial_axis.npy", fingerprints.radii)
 
     # --- stage1_summary.json -------------------------------------------------
+    _ensure_roi_candidates_file(output_dir, diagnostics)
+
     labels_path = classes_dir / "fingerprint_class_labels.npy"
     roi_candidates_path = output_dir / "roi_candidates" / "roi_candidates.yaml"
     stage1_summary = {
@@ -556,22 +579,22 @@ def _save_stage1_outputs(
         "q_crop": preprocess_cfg.get("q_crop"),
         "q_bin": int(preprocess_cfg.get("q_bin", 1)),
         "r_bin": int(preprocess_cfg.get("r_bin", 1)),
-        "labels_path": str(labels_path.relative_to(output_dir).as_posix())
-        if labels_path.exists() else None,
-        "roi_candidates_path": str(roi_candidates_path.relative_to(output_dir).as_posix())
-        if roi_candidates_path.exists() else None,
+        "labels_path": _relative_path_if_exists(labels_path, output_dir),
+        "roi_candidates_path": _relative_path_if_exists(roi_candidates_path, output_dir),
         "qc_status": qc_result.stage1_status,
-        "virtual_images_path": "virtual/virtual_images.npz",
-        "fingerprints_path": "fingerprints/radial_fingerprints.npy",
-        "radial_axis_path": "fingerprints/radial_axis.npy",
-        "orientation_index_path": "orientation/orientation_index.npy",
-        "orientation_score_path": "orientation/orientation_score.npy",
-        "data_contract_path": "data_contract.json",
-        "preprocess_info_path": "preprocess_info.json",
-        "provenance_path": "provenance.json",
-        "qc_summary_path": "qc_summary.json",
-        "cluster_summary_path": "fingerprint_classes/cluster_summary.csv",
-        "cluster_mean_radial_profiles_path": "fingerprint_classes/cluster_mean_radial_profiles.npy",
+        "virtual_images_path": _relative_path_if_exists(virtual_dir / "virtual_images.npz", output_dir),
+        "fingerprints_path": _relative_path_if_exists(fingerprints_dir / "radial_fingerprints.npy", output_dir),
+        "radial_axis_path": _relative_path_if_exists(fingerprints_dir / "radial_axis.npy", output_dir),
+        "orientation_index_path": _relative_path_if_exists(orientation_dir / "orientation_index.npy", output_dir),
+        "orientation_score_path": _relative_path_if_exists(orientation_dir / "orientation_score.npy", output_dir),
+        "data_contract_path": _relative_path_if_exists(output_dir / "data_contract.json", output_dir),
+        "preprocess_info_path": _relative_path_if_exists(output_dir / "preprocess_info.json", output_dir),
+        "provenance_path": _relative_path_if_exists(output_dir / "provenance.json", output_dir),
+        "qc_summary_path": _relative_path_if_exists(output_dir / "qc_summary.json", output_dir),
+        "cluster_summary_path": _relative_path_if_exists(classes_dir / "cluster_summary.csv", output_dir),
+        "cluster_mean_radial_profiles_path": _relative_path_if_exists(
+            classes_dir / "cluster_mean_radial_profiles.npy", output_dir,
+        ),
         "dependencies": {
             "source_backend": dataset.metadata.get("source_backend", "unknown") if dataset else "none",
             "pyxem_available": dataset.metadata.get("pyxem_available", False) if dataset else False,
@@ -585,6 +608,34 @@ def _save_stage1_outputs(
     log.info("Stage-1 → Stage-2 interface written to %s", output_dir)
 
 
+def _relative_path_if_exists(path: Path, base: Path) -> str | None:
+    """Return a POSIX relative path only when *path* exists."""
+    if not path.exists():
+        return None
+    return path.relative_to(base).as_posix()
+
+
+def _ensure_roi_candidates_file(output_dir: Path, diagnostics: dict[str, Any]) -> None:
+    """Create a valid empty ROI-candidates file pair when diagnostics skipped it."""
+    roi_dir = output_dir / "roi_candidates"
+    yaml_path = roi_dir / "roi_candidates.yaml"
+    csv_path = roi_dir / "roi_candidates.csv"
+    if yaml_path.exists() and csv_path.exists():
+        return
+
+    roi_dir.mkdir(parents=True, exist_ok=True)
+    if not yaml_path.exists():
+        yaml_path.write_text("rois: []\n", encoding="utf-8")
+    if not csv_path.exists():
+        csv_path.write_text("name,bbox,center,size,reason,recommended_stage2,cluster\n", encoding="utf-8")
+
+    roi_outputs = diagnostics.setdefault("roi_outputs", {})
+    if isinstance(roi_outputs, dict):
+        roi_outputs.setdefault("yaml", str(yaml_path))
+        roi_outputs.setdefault("csv", str(csv_path))
+    diagnostics.setdefault("roi_candidates", str(roi_dir))
+
+
 def _make_error_result(
     output_dir: Path,
     dataset: DatasetHandle | None,
@@ -592,10 +643,29 @@ def _make_error_result(
 ) -> WorkflowResult:
     """Return a result with everything set to None when the workflow cannot proceed."""
     log.error("Workflow aborted due to unrecoverable error(s).")
+    qc_result = run_qc_checks(
+        dataset=dataset,
+        virtual=None,
+        fingerprints=None,
+        phase=None,
+        orientation=None,
+        diagnostics={},
+        errors=errors,
+    )
+    save_qc_summary(output_dir, qc_result)
+    summary = {
+        "dataset": dataset.describe() if dataset else None,
+        "qc": qc_result.to_dict(),
+        "outputs": {
+            "qc_summary": str(output_dir / "qc_summary.json"),
+        },
+        "errors": errors,
+    }
+    summary_path = save_summary(output_dir, summary)
     return WorkflowResult(
         output_dir=output_dir,
         dataset=dataset,
-        summary_path=None,
+        summary_path=summary_path,
         report_path=None,
         errors=errors,
     )

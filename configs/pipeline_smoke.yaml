@@ -1,0 +1,62 @@
+# Lightweight unified pipeline config for fast local validation.
+# Runs Stage 1 only on the synthetic demo dataset.
+
+pipeline:
+  stages: [stage1]
+  output_dir: test_outputs/pipeline_smoke/pipeline
+
+project:
+  name: pipeline_smoke
+  output_dir: test_outputs/pipeline_smoke/stage1
+
+data:
+  path: synthetic://demo
+  lazy: true
+  chunks:
+    navigation: [8, 8]
+    signal: [64, 64]
+
+preprocess:
+  q_crop: null
+  q_bin: 1
+  r_bin: 1
+
+geometry:
+  center: null
+  radial_bins: 24
+
+virtual_images:
+  masks:
+    bf: {inner_radius: 0, outer_radius: 8}
+    adf: {inner_radius: 10, outer_radius: 22}
+    ring_1: {inner_radius: 8, outer_radius: 16}
+    ring_2: {inner_radius: 16, outer_radius: 28}
+    ring_3: {inner_radius: 28, outer_radius: 31}
+
+phase_screening:
+  method: pca_nmf_cluster
+  n_components: 3
+  n_clusters: 3
+  candidate_phases: []
+
+orientation:
+  preview_binning: [2, 2]
+  roi: [4, 12, 4, 12]
+  confidence_threshold: 0.0
+
+sample_mask:
+  enabled: false
+
+stage2a:
+  max_rois: 1
+  thin_r: 2
+  bin_q: 2
+  mem: MEMMAP
+  save_roi_data: false
+
+stage2b:
+  template_generation:
+    max_index: 2
+  matching:
+    top_k_per_phase: 3
+  candidate_cifs: []

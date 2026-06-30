@@ -21,6 +21,7 @@ from .logging import configure_pipeline_logging, get_logger
 from .masks import build_annular_masks
 from .orientation import OrientationResult, run_orientation_preview
 from .phase import PhaseScreeningResult, screen_phases
+from .pipeline import PipelineResult, PipelineStageRecord, run_pipeline
 from .preprocess import PreprocessedArray, PreprocessSpec, apply_preprocess
 from .preprocess_raw import bin_and_export, crop_navigation_and_export
 from .roi_bragg import ROIBraggResult, Stage2Result, load_roi_candidates, run_roi_bragg_for_rois
@@ -40,6 +41,8 @@ __all__ = [
     "OrientationMap",
     "OrientationResult",
     "PhaseScreeningResult",
+    "PipelineResult",
+    "PipelineStageRecord",
     "PolarSignal",
     "PreprocessedArray",
     "PreprocessSpec",
@@ -70,6 +73,7 @@ __all__ = [
     "polar_reproject",
     "resolve_data_config",
     "run_orientation_preview",
+    "run_pipeline",
     "run_roi_bragg_for_rois",
     "run_stage1_diagnostics",
     "run_stage2",

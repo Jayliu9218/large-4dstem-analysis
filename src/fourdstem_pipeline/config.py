@@ -21,6 +21,14 @@ log = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 _SCHEMA: dict[str, dict[str, Any]] = {
+    "pipeline": {
+        "allowed": {"stages", "output_dir"},
+        "types": {
+            "stages": (list, tuple),
+            "output_dir": (str, type(None)),
+        },
+        "defaults": {"stages": ["stage1", "stage2a", "stage2b"]},
+    },
     "project": {
         "allowed": {"name", "output_dir"},
         "types": {"name": str, "output_dir": (str,)},
@@ -162,6 +170,38 @@ _SCHEMA: dict[str, dict[str, Any]] = {
             "background_label": -1,
         },
     },
+    "stage2a": {
+        "allowed": {
+            "stage1_dir",
+            "data_path",
+            "output_dir",
+            "roi_source",
+            "max_rois",
+            "thin_r",
+            "bin_q",
+            "mem",
+            "scan_shape",
+            "corr_power",
+            "sigma_cc",
+            "edge_boundary",
+            "min_relative_intensity",
+            "min_peak_spacing",
+            "subpixel",
+            "max_num_peaks",
+            "cuda",
+            "central_exclusion_radius",
+            "save_roi_data",
+        },
+    },
+    "stage2b": {
+        "allowed": {
+            "stage2_dir",
+            "output_dir",
+            "template_generation",
+            "matching",
+            "candidate_cifs",
+        },
+    },
 }
 
 _KNOWN_TOP_KEYS = set(_SCHEMA)
@@ -172,7 +212,7 @@ _KNOWN_TOP_KEYS = set(_SCHEMA)
 # ---------------------------------------------------------------------------
 
 
-def load_workflow_config(path: str | Path = "configs/default_workflow.yaml") -> dict[str, Any]:
+def load_workflow_config(path: str | Path = "configs/pipeline.yaml") -> dict[str, Any]:
     """Load and validate a YAML workflow configuration."""
     config_path = Path(path)
     with config_path.open("r", encoding="utf-8") as stream:

@@ -21,6 +21,7 @@ from fourdstem_pipeline import (
     load_roi_candidates,
     load_stage1_manifest,
     run_orientation_preview,
+    run_pipeline,
     run_stage1_diagnostics,
     run_workflow,
     screen_phases,
@@ -293,6 +294,9 @@ class WorkflowTests(unittest.TestCase):
             any(f.get("code") == "ORIENTATION_ROI_INVALID" for f in flags),
             f"Expected ORIENTATION_ROI_INVALID flag, got: {[f.get('code') for f in flags]}",
         )
+        manifest = Stage1Manifest.load(self.output_dir)
+        self.assertTrue(manifest.roi_candidates_path.exists())
+        self.assertEqual(manifest.raw["roi_candidates_path"], "roi_candidates/roi_candidates.yaml")
 
     def test_diagnostics_resilient_to_missing_orientation(self):
         """run_stage1_diagnostics preserves partial results when orientation is None."""
@@ -342,6 +346,202 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result_none.get("orientation_reliability"), {})
         self.assertEqual(result_none.get("roi_outputs"), {})
         self.assertEqual(result_none.get("cluster_vs_orientation"), {})
+
+    def test_run_workflow_records_load_failure(self):
+        """Load-stage exceptions are preserved in WorkflowResult.errors."""
+        from unittest.mock import patch
+
+        config = {
+            "project": {"name": "test_load_fail", "output_dir": str(self.output_dir)},
+            "data": {"path": "synthetic://demo", "lazy": True},
+            "preprocess": {"q_crop": None, "q_bin": 1, "r_bin": 1},
+            "geometry": {"center": None, "radial_bins": 8},
+            "virtual_images": {"masks": {"bf": {"inner_radius": 0, "outer_radius": 4}}},
+            "phase_screening": {"method": "pca_nmf_cluster", "n_components": 2, "n_clusters": 2, "candidate_phases": []},
+            "orientation": {"preview_binning": [2, 2], "roi": None, "confidence_threshold": 0.0},
+            "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
+        }
+        with patch("fourdstem_pipeline.workflow.load_dataset", side_effect=RuntimeError("boom")):
+            result = run_workflow(config)
+
+        self.assertIsNone(result.dataset)
+        self.assertTrue(result.errors)
+        self.assertEqual(result.errors[0]["stage"], "load")
+        self.assertIn("boom", result.errors[0]["error"])
+        self.assertTrue((self.output_dir / "qc_summary.json").exists())
+        self.assertTrue((self.output_dir / "workflow_summary.json").exists())
+
+    def test_run_workflow_records_preprocess_failure(self):
+        """Preprocess-stage exceptions are preserved in WorkflowResult.errors."""
+        from unittest.mock import patch
+
+        config = {
+            "project": {"name": "test_preprocess_fail", "output_dir": str(self.output_dir)},
+            "data": {"path": "synthetic://demo", "lazy": True},
+            "preprocess": {"q_crop": None, "q_bin": 1, "r_bin": 1},
+            "geometry": {"center": None, "radial_bins": 8},
+            "virtual_images": {"masks": {"bf": {"inner_radius": 0, "outer_radius": 4}}},
+            "phase_screening": {"method": "pca_nmf_cluster", "n_components": 2, "n_clusters": 2, "candidate_phases": []},
+            "orientation": {"preview_binning": [2, 2], "roi": None, "confidence_threshold": 0.0},
+            "roi_bragg": {"enabled": False},
+            "sample_mask": {"enabled": False},
+        }
+        with patch("fourdstem_pipeline.workflow.apply_preprocess", side_effect=RuntimeError("bad prep")):
+            result = run_workflow(config)
+
+        self.assertIsNone(result.dataset)
+        self.assertTrue(result.errors)
+        self.assertEqual(result.errors[0]["stage"], "preprocess")
+        self.assertIn("bad prep", result.errors[0]["error"])
+        self.assertTrue((self.output_dir / "qc_summary.json").exists())
+        self.assertTrue((self.output_dir / "workflow_summary.json").exists())
+
+    def test_empty_cluster_diagnostics_write_header_only_outputs(self):
+        """Diagnostics helpers do not crash when all labels are background."""
+        from fourdstem_pipeline.diagnostics_cluster import write_cluster_summary, stats_bar_values, normalisation_comparison
+        from fourdstem_pipeline.diagnostics_spatial import connected_component_diagnostics, roi_candidates
+        from fourdstem_pipeline.orientation import OrientationResult
+
+        labels = np.full((4, 4), -1, dtype=np.int16)
+        images = {"bf": np.ones((4, 4), dtype=np.float32)}
+        for path in ("components", "png", "classes", "summary", "norm", "png_norm", "rois"):
+            (self.output_dir / path).mkdir(parents=True, exist_ok=True)
+        connected = connected_component_diagnostics(
+            labels,
+            images,
+            [],
+            self.output_dir / "components",
+            self.output_dir / "png",
+            self.output_dir / "classes",
+        )
+        self.assertTrue(Path(connected["connected_components_csv"]).exists())
+        self.assertTrue((self.output_dir / "classes" / "fingerprint_class_labels_cleaned.npy").exists())
+
+        write_cluster_summary(self.output_dir / "summary", [])
+        self.assertTrue((self.output_dir / "summary" / "cluster_summary.csv").exists())
+        self.assertEqual(stats_bar_values([]).shape, (1, 6))
+        self.assertEqual(
+            normalisation_comparison(
+                np.zeros((4, 4, 3), dtype=np.float32),
+                0,
+                self.output_dir / "norm",
+                self.output_dir / "png_norm",
+            ),
+            {},
+        )
+
+        orientation = OrientationResult(
+            orientation_index=np.zeros((2, 2), dtype=np.int16),
+            phase_label=np.zeros((2, 2), dtype=np.int16),
+            score=np.ones((2, 2), dtype=np.float32),
+            low_confidence_mask=np.zeros((2, 2), dtype=bool),
+            roi=None,
+        )
+        roi_outputs = roi_candidates(labels, images, orientation, [], self.output_dir / "rois", self.output_dir / "png")
+        self.assertTrue(Path(roi_outputs["yaml"]).exists())
+        self.assertTrue(Path(roi_outputs["csv"]).exists())
+
+    def test_run_pipeline_smoke_stage1_only_config(self):
+        """pipeline_smoke.yaml runs Stage 1 and writes pipeline_summary.json."""
+        smoke_root = WORKSPACE_TMP / "pipeline_smoke"
+        if smoke_root.exists():
+            shutil.rmtree(smoke_root)
+
+        result = run_pipeline("configs/pipeline_smoke.yaml")
+
+        self.assertEqual(result.stages["stage1"].status, "success")
+        self.assertEqual(result.stages["stage2a"].status, "skipped")
+        self.assertEqual(result.stages["stage2b"].status, "skipped")
+        self.assertTrue(result.summary_path.exists())
+        summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+        self.assertEqual(summary["status"], "success")
+        self.assertEqual(summary["stages"]["stage2a"]["skipped_reason"], "Not listed in pipeline.stages.")
+
+    def test_run_pipeline_injects_stage_paths(self):
+        """Unified runner injects stage1_dir and stage2_dir into downstream stages."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        stage1_dir = self.output_dir / "stage1"
+        stage1_dir.mkdir()
+        stage2a_dir = stage1_dir / "stage2" / "roi_bragg"
+        stage2a_dir.mkdir(parents=True)
+        config = {
+            "pipeline": {"stages": ["stage1", "stage2a", "stage2b"], "output_dir": str(self.output_dir / "pipeline")},
+            "project": {"name": "pipe_test", "output_dir": str(stage1_dir)},
+            "data": {"path": "synthetic://demo"},
+            "stage2a": {"thin_r": 2},
+            "stage2b": {"candidate_cifs": []},
+        }
+        fake_stage1 = SimpleNamespace(output_dir=stage1_dir, summary_path=stage1_dir / "workflow_summary.json", errors=[])
+        fake_stage2a = SimpleNamespace(output_dir=stage2a_dir, roi_results=[])
+
+        with patch("fourdstem_pipeline.pipeline.run_workflow", return_value=fake_stage1) as wf, \
+             patch("fourdstem_pipeline.pipeline.run_stage2", return_value=fake_stage2a) as s2a, \
+             patch("fourdstem_pipeline.pipeline.run_stage2_indexing", return_value={"output_dir": str(stage2a_dir / "stage2b_indexing")}) as s2b:
+            result = run_pipeline(config)
+
+        self.assertEqual(result.stages["stage1"].status, "success")
+        self.assertEqual(result.stages["stage2a"].status, "success")
+        self.assertEqual(result.stages["stage2b"].status, "success")
+        self.assertEqual(wf.call_args.args[0]["project"]["output_dir"], str(stage1_dir))
+        self.assertEqual(s2a.call_args.kwargs["config"]["stage1_dir"], str(stage1_dir))
+        self.assertEqual(s2b.call_args.args[0]["stage2_dir"], str(stage2a_dir))
+
+    def test_run_pipeline_skips_after_stage1_failure(self):
+        """Stage 2A and 2B are skipped when Stage 1 fails."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        stage1_dir = self.output_dir / "stage1_failed"
+        config = {
+            "pipeline": {"stages": ["stage1", "stage2a", "stage2b"], "output_dir": str(self.output_dir / "pipeline")},
+            "project": {"name": "pipe_fail", "output_dir": str(stage1_dir)},
+            "data": {"path": "synthetic://demo"},
+            "stage2a": {},
+            "stage2b": {},
+        }
+        fake_stage1 = SimpleNamespace(
+            output_dir=stage1_dir,
+            summary_path=None,
+            errors=[{"stage": "load", "error": "boom"}],
+        )
+
+        with patch("fourdstem_pipeline.pipeline.run_workflow", return_value=fake_stage1), \
+             patch("fourdstem_pipeline.pipeline.run_stage2") as s2a, \
+             patch("fourdstem_pipeline.pipeline.run_stage2_indexing") as s2b:
+            result = run_pipeline(config)
+
+        self.assertEqual(result.stages["stage1"].status, "failed")
+        self.assertEqual(result.stages["stage2a"].status, "skipped")
+        self.assertEqual(result.stages["stage2b"].status, "skipped")
+        self.assertEqual(result.stages["stage2a"].skipped_reason, "Stage 1 did not complete successfully.")
+        s2a.assert_not_called()
+        s2b.assert_not_called()
+
+    def test_pipeline_cli_entrypoint_registered_and_callable(self):
+        """The unified pipeline command is registered and dispatches run_pipeline."""
+        import io
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from fourdstem_pipeline.cli import pipeline as pipeline_cli
+        from fourdstem_pipeline.pipeline import PipelineStageRecord
+
+        fake_result = SimpleNamespace(
+            errors=[],
+            summary_path=self.output_dir / "pipeline_summary.json",
+            stages={"stage1": PipelineStageRecord(name="stage1", status="success")},
+        )
+        with patch("sys.argv", ["fourdstem-pipeline", "--config", "configs/pipeline_smoke.yaml"]), \
+             patch("fourdstem_pipeline.pipeline.run_pipeline", return_value=fake_result) as run_pipe, \
+             patch("sys.stdout", new=io.StringIO()) as stdout:
+            pipeline_cli()
+
+        self.assertIn("Pipeline finished successfully", stdout.getvalue())
+        self.assertEqual(run_pipe.call_args.kwargs["config"], "configs/pipeline_smoke.yaml")
+        pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('fourdstem-pipeline = "fourdstem_pipeline.cli:pipeline"', pyproject)
 
     def test_qc_summary_and_report_use_ascii_labels(self):
         """QC summary and report Markdown contain only ASCII labels, no emoji."""
@@ -689,6 +889,7 @@ class WorkflowTests(unittest.TestCase):
                 val.startswith("/") or (len(val) > 1 and val[1] == ":"),
                 f"{key} should be relative, got: {val}",
             )
+            self.assertTrue((self.output_dir / val).exists(), f"{key} should point to an existing file: {val}")
 
     def test_roi_candidates_loadable(self):
         """ROI candidates YAML can be loaded with load_roi_candidates."""
@@ -2202,12 +2403,14 @@ class WorkflowTests(unittest.TestCase):
         from fourdstem_pipeline.stage2 import run_stage2
         from pathlib import Path
 
-        # Use the default config but cap to 1 ROI
-        config_path = Path(__file__).resolve().parents[1] / "configs" / "stage2_roi_bragg.yaml"
+        # Use the unified config's Stage 2A section but cap to 1 ROI.
+        config_path = Path(__file__).resolve().parents[1] / "configs" / "pipeline.yaml"
         if not config_path.exists():
             self.skipTest(f"Config not found: {config_path}")
 
-        stage2_cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        pipeline_cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        stage2_cfg = dict(pipeline_cfg["stage2a"])
+        stage2_cfg["stage1_dir"] = pipeline_cfg["project"]["output_dir"]
         stage2_cfg["max_rois"] = 1
 
         result = run_stage2(stage2_cfg)

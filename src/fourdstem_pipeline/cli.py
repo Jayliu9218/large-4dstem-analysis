@@ -52,6 +52,35 @@ def run() -> None:
         print(f"\nWorkflow finished successfully.")
 
 
+def pipeline() -> None:
+    """``fourdstem-pipeline`` - execute the unified multi-stage pipeline."""
+    parser = argparse.ArgumentParser(
+        description="4D-STEM unified pipeline: Stage 1 -> Stage 2A -> Stage 2B",
+    )
+    parser.add_argument(
+        "--config",
+        default="configs/pipeline.yaml",
+        help="Path to unified pipeline YAML configuration  [default: configs/pipeline.yaml]",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging verbosity  [default: INFO]",
+    )
+    args = parser.parse_args()
+
+    from .pipeline import run_pipeline
+
+    result = run_pipeline(config=args.config, log_level=args.log_level)
+    if result.errors:
+        print(f"\nPipeline finished with {len(result.errors)} error(s).", file=sys.stderr)
+        print(f"  Summary: {result.summary_path}", file=sys.stderr)
+        sys.exit(1)
+    print("\nPipeline finished successfully.")
+    print(f"  Summary: {result.summary_path}\n")
+
+
 def dry_run() -> None:
     """``fourdstem-dry-run`` — validate config and estimate resources."""
     parser = _base_parser()
@@ -97,8 +126,8 @@ def stage2() -> None:
     )
     parser.add_argument(
         "--config",
-        default="configs/stage2_roi_bragg.yaml",
-        help="Path to Stage 2 YAML configuration  [default: configs/stage2_roi_bragg.yaml]",
+        default="configs/pipeline.yaml",
+        help="Path to unified or Stage 2 YAML configuration  [default: configs/pipeline.yaml]",
     )
     parser.add_argument(
         "--log-level",
@@ -114,7 +143,7 @@ def stage2() -> None:
     configure_pipeline_logging(level=args.log_level)
 
     try:
-        result = run_stage2(config=args.config)
+        result = run_stage2(config=_extract_stage2a_config(args.config))
     except Exception as exc:
         print(f"\nStage 2A failed: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -142,15 +171,15 @@ def stage2b() -> None:
     )
     parser.add_argument(
         "--config",
-        default="configs/stage2_indexing.yaml",
-        help="Path to Stage 2B YAML configuration  [default: configs/stage2_indexing.yaml]",
+        default="configs/pipeline.yaml",
+        help="Path to unified or Stage 2B YAML configuration  [default: configs/pipeline.yaml]",
     )
     args = parser.parse_args()
 
     from .indexing import run_stage2_indexing
 
     try:
-        summary = run_stage2_indexing(config=args.config)
+        summary = run_stage2_indexing(config=_extract_stage2b_config(args.config))
     except Exception as exc:
         print(f"\nStage 2B failed: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -269,10 +298,46 @@ def _base_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--config",
-        default="configs/default_workflow.yaml",
-        help="Path to YAML workflow configuration  [default: configs/default_workflow.yaml]",
+        default="configs/pipeline.yaml",
+        help="Path to YAML workflow or unified pipeline configuration  [default: configs/pipeline.yaml]",
     )
     return p
+
+
+def _extract_stage2a_config(config_path: str | Path) -> str | dict[str, Any]:
+    """Return a Stage 2A config, extracting from unified pipeline YAML if needed."""
+    cfg = _load_yaml_mapping(config_path)
+    if "stage2a" not in cfg:
+        return str(config_path)
+    stage2a = dict(cfg.get("stage2a") or {})
+    stage2a.setdefault("stage1_dir", (cfg.get("project") or {}).get("output_dir", "outputs"))
+    stage2a.setdefault("output_dir", None)
+    return stage2a
+
+
+def _extract_stage2b_config(config_path: str | Path) -> str | dict[str, Any]:
+    """Return a Stage 2B config, extracting from unified pipeline YAML if needed."""
+    cfg = _load_yaml_mapping(config_path)
+    if "stage2b" not in cfg:
+        return str(config_path)
+    project_cfg = cfg.get("project") or {}
+    stage2a_cfg = cfg.get("stage2a") or {}
+    stage1_dir = Path(project_cfg.get("output_dir", "outputs"))
+    default_stage2a_dir = Path(stage2a_cfg.get("output_dir") or stage1_dir / "stage2" / "roi_bragg")
+    stage2b = dict(cfg.get("stage2b") or {})
+    stage2b.setdefault("stage2_dir", str(default_stage2a_dir))
+    stage2b.setdefault("output_dir", None)
+    return stage2b
+
+
+def _load_yaml_mapping(path: str | Path) -> dict[str, Any]:
+    import yaml
+
+    cfg_path = Path(path)
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    if not isinstance(cfg, dict):
+        raise ValueError(f"Config must be a YAML mapping, got {type(cfg).__name__}.")
+    return cfg
 
 
 def _perform_dry_run(config_path: str) -> dict[str, Any]:
@@ -597,8 +662,8 @@ def _check_existing_results(output_dir: Path) -> list[str]:
 def _warn_unknown_keys(cfg: dict[str, Any], checks: list[dict[str, Any]]) -> None:
     """Detect unknown top-level keys and emit warnings."""
     known = {
-        "project", "data", "preprocess", "geometry", "virtual_images",
-        "phase_screening", "orientation", "roi_bragg", "sample_mask",
+        "pipeline", "project", "data", "preprocess", "geometry", "virtual_images",
+        "phase_screening", "orientation", "roi_bragg", "sample_mask", "stage2a", "stage2b",
     }
     unknown = sorted(set(cfg) - known)
     for key in unknown:
@@ -610,6 +675,9 @@ def _warn_unknown_keys(cfg: dict[str, Any], checks: list[dict[str, Any]]) -> Non
 
 def _resolve_stages(cfg: dict[str, Any]) -> list[str]:
     """Return the ordered list of enabled stages."""
+    pipeline_cfg = cfg.get("pipeline", {})
+    if isinstance(pipeline_cfg, dict) and pipeline_cfg.get("stages"):
+        return [str(stage) for stage in pipeline_cfg.get("stages", [])]
     stages = ["load", "preprocess", "virtual_images", "sample_mask", "fingerprints",
               "fingerprint_classes", "orientation_preview"]
     roi_cfg = cfg.get("roi_bragg", {})
@@ -767,6 +835,7 @@ def _jsonable(value: Any) -> Any:
 
 
 _SUBCOMMANDS: dict[str, str] = {
+    "pipeline": "Execute the unified Stage 1 -> 2A -> 2B pipeline",
     "run": "Execute the Stage-1 workflow",
     "dry_run": "Validate configuration without loading data",
     "stage2": "Execute Stage 2A ROI Bragg detection",
@@ -787,7 +856,9 @@ def _main() -> None:
     # Remove the subcommand so the inner argparse sees only its own args.
     sys.argv.pop(1)
 
-    if subcommand == "run":
+    if subcommand == "pipeline":
+        pipeline()
+    elif subcommand == "run":
         run()
     elif subcommand == "dry_run":
         dry_run()
