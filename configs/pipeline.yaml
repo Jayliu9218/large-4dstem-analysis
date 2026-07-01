@@ -7,6 +7,7 @@
 #   fourdstem-run --config configs/pipeline.yaml
 #   fourdstem-stage2 --config configs/pipeline.yaml
 #   fourdstem-stage2b --config configs/pipeline.yaml
+#   fourdstem-stage2c --config configs/pipeline.yaml
 
 pipeline:
   stages: [stage1, stage2a, stage2b]
@@ -124,3 +125,52 @@ stage2b:
       phase: Ti-bcc
       path: data/0617-4d/Ti-bcc.cif
       space_group: 229
+
+stage2c:
+  enabled: false
+  backend: pyxem
+  dry_run: false
+  output_dir: null
+  input:
+    mode: roi_or_tile
+    source: existing_pyxem_npz
+    results_npz: null
+    use_stage2a_rois: true
+  candidates:
+    phases:
+      - name: Ti-bcc
+        cif: data/0617-4d/Ti-bcc.cif
+        color: blue
+      - name: Ti-hcp
+        cif: data/0617-4d/Ti-hcp.cif
+        color: red
+  calibration:
+    beam_energy_kv: 200
+    inv_ang_per_pixel: 0.0192
+    center: null
+    reciprocal_radius: 1.8
+  polar:
+    npt: 160
+    npt_azim: 360
+    background: radial_percentile
+    background_percentile: 20
+    gamma: 0.5
+  orientation:
+    orientation_resolution_deg: 1.0
+    minimum_intensity: 0.03
+    max_excitation_error: 0.06
+    n_best: 8
+    frac_keep: 0.05
+  qc:
+    margin_threshold: 0.15
+    min_correlation: null
+    allow_missing_opponent: false
+  runtime:
+    n_workers: 8
+    threads_per_worker: 1
+    chunk_nav: 16
+
+consensus:
+  output_dir: null
+  stage2b_manifest: null
+  stage2c_manifest: null

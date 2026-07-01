@@ -16,7 +16,7 @@ import numpy as np
 import yaml
 
 from .config import load_workflow_config
-from .contracts import Stage1Manifest, Stage1ManifestLoadError
+from .contracts import Stage1Manifest, Stage1ManifestLoadError, roi_indexing_blockers, roi_indexing_readiness
 from .export_stage2 import build_benchmark, save_stage2_benchmark, save_stage2_gallery, save_stage2_report
 from .logging import configure_pipeline_logging, get_logger
 from .provenance import collect_provenance, save_provenance
@@ -102,6 +102,13 @@ def run_stage2(config: str | Path | dict[str, Any]) -> Stage2Result:
     log.info("Loading ROI candidates from %s", roi_yaml)
     rois = load_roi_candidates(roi_yaml)
     log.info("Found %d ROI candidate(s)", len(rois))
+    n_rois_before_dedup = len(rois)
+    rois, duplicate_roi_records = _deduplicate_rois(rois)
+    if duplicate_roi_records:
+        log.warning(
+            "Deduplicated %d ROI candidate(s) with repeated bbox/sample coverage.",
+            len(duplicate_roi_records),
+        )
 
     max_rois = cfg.get("max_rois")
     if max_rois is not None:
@@ -204,7 +211,14 @@ def run_stage2(config: str | Path | dict[str, Any]) -> Stage2Result:
         roi_results=roi_results,
     )
 
-    summary = _build_stage2_summary(result, provenance, cfg, beam_center_yx)
+    summary = _build_stage2_summary(
+        result,
+        provenance,
+        cfg,
+        beam_center_yx,
+        n_rois_before_dedup=n_rois_before_dedup,
+        duplicate_roi_records=duplicate_roi_records,
+    )
     summary_path = output_dir / "stage2_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
     log.info("Stage 2 summary written to %s", summary_path)
@@ -324,11 +338,38 @@ def _parse_scan_shape(value: Any) -> tuple[int, int] | None:
     return scan_shape
 
 
+def _deduplicate_rois(rois: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Drop repeated ROI candidates with identical bbox/sample coverage evidence."""
+    seen: dict[tuple[Any, ...], dict[str, Any]] = {}
+    unique: list[dict[str, Any]] = []
+    duplicates: list[dict[str, Any]] = []
+    for roi in rois:
+        bbox = tuple(int(v) for v in roi.get("bbox", []))
+        sample_cov = roi.get("sample_mask_coverage")
+        cov_key = None if sample_cov is None else round(float(sample_cov), 4)
+        key = (bbox,)
+        if key in seen:
+            kept = seen[key]
+            duplicates.append({
+                "dropped_name": roi.get("name"),
+                "kept_name": kept.get("name"),
+                "bbox": list(bbox),
+                "sample_mask_coverage": cov_key,
+                "reason": "duplicate bbox",
+            })
+            continue
+        seen[key] = roi
+        unique.append(roi)
+    return unique, duplicates
+
+
 def _build_stage2_summary(
     result: Stage2Result,
     provenance: dict[str, Any],
     cfg: dict[str, Any],
     beam_center_yx: tuple[float, float] | None = None,
+    n_rois_before_dedup: int | None = None,
+    duplicate_roi_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the stage2_summary.json dict."""
     data_path_str = str(_resolve_data_path(cfg, result.manifest))
@@ -336,6 +377,14 @@ def _build_stage2_summary(
 
     roi_summaries: list[dict[str, Any]] = []
     for r in result.roi_results:
+        roi_readiness_input = {
+            "error": r.error,
+            "n_bragg_peaks": r.n_peaks,
+            "background_fraction": r.background_fraction,
+            "sample_mask_coverage": r.sample_mask_coverage,
+            "beam_center_source": r.beam_center_source,
+            "bragg_qc": r.bragg_qc,
+        }
         roi_summaries.append({
             "name": r.name,
             "stage1_bbox": r.stage1_bbox,
@@ -350,11 +399,15 @@ def _build_stage2_summary(
             "background_fraction": r.background_fraction,
             "sample_mask_coverage": r.sample_mask_coverage,
             "cluster_validation_warning": r.cluster_validation_warning,
+            "cluster_mask": r.cluster_mask,
             "roi_data_path": str(r.roi_data_path) if r.roi_data_path else None,
+            "mean_dp_path": str(r.mean_dp_path) if r.mean_dp_path else None,
             "bragg_vector_map_path": str(r.bragg_vector_map_path) if r.bragg_vector_map_path else None,
             "bragg_summary_path": str(r.bragg_summary_path) if r.bragg_summary_path else None,
             "bragg_peaks_parquet_path": str(r.bragg_peaks_parquet_path) if r.bragg_peaks_parquet_path else None,
             "bragg_qc": r.bragg_qc,
+            "indexing_readiness": roi_indexing_readiness(roi_readiness_input),
+            "indexing_blockers": roi_indexing_blockers(roi_readiness_input),
             "error": r.error,
         })
 
@@ -375,6 +428,12 @@ def _build_stage2_summary(
             "max_rois": cfg.get("max_rois"),
             "roi_source": cfg.get("roi_source", "roi_candidates"),
             "scan_shape": list(configured_scan_shape) if configured_scan_shape else None,
+        },
+        "roi_deduplication": {
+            "input_roi_count": int(n_rois_before_dedup if n_rois_before_dedup is not None else len(result.roi_results)),
+            "unique_roi_count": len(result.roi_results),
+            "duplicate_roi_count": len(duplicate_roi_records or []),
+            "duplicates": duplicate_roi_records or [],
         },
         "beam_center": {
             "stage1_yx": list(beam_center_yx) if beam_center_yx else None,
@@ -542,10 +601,10 @@ def _build_stage2_qc(result: Stage2Result) -> dict[str, Any]:
                 ),
                 "evidence": {"roi": r.name, "edge_peak_fraction": bq["edge_peak_fraction"]},
             })
-        if bq.get("duplicate_peak_fraction", 0.0) > 0.3:
+        if bq.get("peak_splitting_warning", False):
             flags.append({
                 "severity": "warning",
-                "code": "HIGH_DUPLICATE_PEAKS",
+                "code": "PEAK_SPLITTING_WARNING",
                 "message": (
                     f"ROI '{r.name}' has {bq['duplicate_peak_fraction']:.1%} "
                     f"peaks too close together (< minPeakSpacing) — possible splitting."

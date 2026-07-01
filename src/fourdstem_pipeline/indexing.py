@@ -12,14 +12,14 @@ import hashlib
 import json
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import yaml
 
-from .contracts import is_roi_ready_for_indexing
+from .contracts import is_roi_ready_for_indexing, roi_indexing_blockers, roi_indexing_readiness
 from .export import (
     apply_ipf_colors,
     mask_center_for_display,
@@ -98,6 +98,9 @@ class ROIIndexingResult:
     orientation_confidence: str = "not_scored"
     mapping_confidence: str = "not_scored"
     ambiguity_reason: str | None = None
+    primary_limiting_factors: list[str] | None = None
+    indexability_score: float | None = None
+    indexability_tier: str | None = None
 
 
 def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
@@ -127,6 +130,15 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
         roi for roi in stage2a_summary.get("roi_results", [])
         if is_roi_ready_for_indexing(roi)
     ]
+    rejected_rois = [
+        {
+            "name": roi.get("name"),
+            "indexing_readiness": roi_indexing_readiness(roi),
+            "indexing_blockers": roi_indexing_blockers(roi),
+        }
+        for roi in stage2a_summary.get("roi_results", [])
+        if not is_roi_ready_for_indexing(roi)
+    ]
     geometry = _stage2_geometry(stage2a_summary, required=any(c.cell is not None for c in candidates))
     candidates = _generate_candidate_templates(
         candidates,
@@ -139,6 +151,11 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
         _match_roi_against_candidates(roi, candidates, matching_cfg)
         for roi in accepted_rois
     ]
+    stage2a_by_name = {str(roi.get("name")): roi for roi in accepted_rois}
+    roi_results = [
+        _with_indexability_score(result, stage2a_by_name.get(result.name))
+        for result in roi_results
+    ]
 
     any_template = any(c.template_count > 0 for c in candidates)
     summary = {
@@ -149,6 +166,7 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
             "stage2_dir": str(stage2_dir),
             "summary_path": str(stage2a_summary_path),
             "run_name": stage2a_summary.get("run_name"),
+            "accepted_readiness": "READY_FOR_INDEXING",
         },
         "output_dir": str(output_dir),
         "geometry": geometry,
@@ -175,6 +193,8 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
             for c in candidates
         ],
         "accepted_roi_count": len(accepted_rois),
+        "rejected_roi_count": len(rejected_rois),
+        "rejected_rois": rejected_rois,
         "roi_results": [
             {
                 "name": r.name,
@@ -212,8 +232,18 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
                 "orientation_confidence": r.orientation_confidence,
                 "mapping_confidence": r.mapping_confidence,
                 "ambiguity_reason": r.ambiguity_reason,
+                "primary_limiting_factors": r.primary_limiting_factors,
+                "indexability_score": r.indexability_score,
+                "indexability_tier": r.indexability_tier,
             }
             for r in roi_results
+        ],
+        "failure_root_cause_summary": [
+            {"primary_limiting_factor": factor, "roi_count": count}
+            for factor, count in _root_cause_summary([
+                {"primary_limiting_factors": r.primary_limiting_factors}
+                for r in roi_results
+            ])
         ],
         "notes": [
             "Stage 2B uses analytic kinematic CIF templates when lattice parameters are available.",
@@ -240,6 +270,14 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
 
     # --- Score-sign QC check --------------------------------------------------
     _check_score_signs(roi_results, summary)
+    standard_manifest_path = _write_stage2b_standard_manifest(
+        output_dir,
+        stage2a_summary,
+        accepted_rois,
+        roi_results,
+    )
+    if standard_manifest_path is not None:
+        summary["standard_manifest_path"] = str(standard_manifest_path)
 
     summary_path = output_dir / "stage2_indexing_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
@@ -272,7 +310,7 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
                 contrast_image=contrast_image,
             )
             phase_legend_path = output_dir / "phase_match_legend.png"
-            log.info("Dense cluster phase map saved: %s", phase_map_path)
+            log.info("Dense candidate evidence map saved: %s", phase_map_path)
         else:
             nav_shape = stage2a_summary.get("manifest", {}).get("nav_shape")
             if not (nav_shape and accepted_rois):
@@ -299,7 +337,7 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
                 (int(nav_shape[0]), int(nav_shape[1])),
                 phase_map_entries,
             )
-            log.info("Phase match map saved: %s", phase_map_path)
+            log.info("Candidate evidence map saved: %s", phase_map_path)
     except Exception as exc:
         log.warning("Failed to generate phase match map: %s", exc)
 
@@ -312,8 +350,8 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
             stage2_dir, gallery_summary,
             global_pngs=(
                 [
-                    {"path": str(phase_map_path), "caption": "Phase Map - Stage 1 cluster labels replaced by matched Stage 2B phases"},
-                    {"path": str(phase_legend_path), "caption": "Phase Map Legend"},
+                    {"path": str(phase_map_path), "caption": "Candidate Evidence Map - unresolved calls are not confirmed phases"},
+                    {"path": str(phase_legend_path), "caption": "Candidate Evidence Legend"},
                 ]
                 if phase_map_path and phase_map_path.is_file() else None
             ),
@@ -331,7 +369,7 @@ def run_stage2_indexing(config: str | Path | dict[str, Any]) -> dict[str, Any]:
             phase_map_path=phase_map_path,
             phase_legend_path=phase_legend_path,
         )
-        log.info("Stage 2B phase mapping report saved: %s, %s", report_md, report_html)
+        log.info("Stage 2B candidate evidence report saved: %s, %s", report_md, report_html)
     except Exception as exc:
         log.warning("Failed to write Stage 2B phase mapping report: %s", exc)
 
@@ -440,6 +478,216 @@ def _load_stage1_contrast_image(
     return None
 
 
+def _with_indexability_score(
+    result: ROIIndexingResult,
+    stage2a_roi: dict[str, Any] | None,
+) -> ROIIndexingResult:
+    score = _indexability_score(result, stage2a_roi)
+    tier = _indexability_tier(score, stage2a_roi)
+    return replace(result, indexability_score=score, indexability_tier=tier)
+
+
+def _indexability_score(result: ROIIndexingResult, stage2a_roi: dict[str, Any] | None) -> float:
+    bragg_qc = (stage2a_roi or {}).get("bragg_qc") or {}
+    median_clean = _safe_float(bragg_qc.get("median_clean_peaks_per_DP"), 0.0)
+    clean_peak_score = min(1.0, median_clean / 8.0)
+    radial_support_score = min(1.0, max(0.0, _safe_float(result.radial_support_score, 0.0)))
+    margin_score = min(1.0, max(0.0, _safe_float(result.phase_margin, _safe_float(result.score_margin, 0.0)) / 0.15))
+    unexplained_peak_penalty = min(1.0, max(0.0, _safe_float(result.unexplained_experiment_fraction, 1.0)))
+    duplicate_peak_penalty = min(1.0, max(
+        _safe_float(bragg_qc.get("duplicate_fraction_per_pattern_p90"), 0.0),
+        _safe_float(bragg_qc.get("duplicate_fraction_per_pattern_median"), 0.0),
+    ))
+    if bragg_qc.get("peak_splitting_warning"):
+        duplicate_peak_penalty = max(duplicate_peak_penalty, 0.75)
+    mixed_diffuse_penalty = 0.0
+    if result.phase_call == "AMBIGUOUS" or (result.candidate_phase and "/" in str(result.candidate_phase)):
+        mixed_diffuse_penalty = 0.35
+    if _safe_float(bragg_qc.get("BVM_peak_background_ratio"), 1.0) < 1.5:
+        mixed_diffuse_penalty = max(mixed_diffuse_penalty, 0.35)
+    raw = (
+        clean_peak_score
+        + radial_support_score
+        + margin_score
+        - unexplained_peak_penalty
+        - duplicate_peak_penalty
+        - mixed_diffuse_penalty
+    )
+    return round(max(0.0, min(1.0, raw / 3.0)), 4)
+
+
+def _indexability_tier(score: float, stage2a_roi: dict[str, Any] | None) -> str:
+    readiness = roi_indexing_readiness(stage2a_roi or {})
+    if readiness != "READY_FOR_INDEXING":
+        return "NOT_INDEXABLE" if readiness == "NOT_INDEXABLE" else "SCREENING_ONLY"
+    if score >= 0.60:
+        return "INDEXABLE"
+    if score >= 0.30:
+        return "SCREENING_ONLY"
+    return "NOT_INDEXABLE"
+
+
+def _write_stage2b_standard_manifest(
+    output_dir: Path,
+    stage2a_summary: dict[str, Any],
+    accepted_rois: list[dict[str, Any]],
+    roi_results: list[ROIIndexingResult],
+) -> Path | None:
+    """Write dense py4DSTEM evidence arrays for Stage 2D consensus."""
+    result_by_name = {r.name: r for r in roi_results}
+    labels = _load_stage1_label_map(stage2a_summary)
+    if labels is not None:
+        shape = labels.shape
+    else:
+        nav_shape = stage2a_summary.get("manifest", {}).get("nav_shape")
+        if nav_shape and len(nav_shape) >= 2:
+            shape = (int(nav_shape[0]), int(nav_shape[1]))
+        else:
+            shape = (1, max(len(accepted_rois), 1))
+
+    phase_index = np.full(shape, -1, dtype=np.int16)
+    score = np.full(shape, np.nan, dtype=np.float32)
+    score_margin = np.full(shape, np.nan, dtype=np.float32)
+    ambiguous_mask = np.ones(shape, dtype=bool)
+    high_confidence_mask = np.zeros(shape, dtype=bool)
+    indexability_score = np.zeros(shape, dtype=np.float32)
+    indexability_tier = np.full(shape, 2, dtype=np.int16)
+    roi_evidence: list[dict[str, Any]] = []
+
+    for idx, roi in enumerate(accepted_rois):
+        result = result_by_name.get(str(roi.get("name", "")))
+        if result is None:
+            continue
+        mask = _stage2b_roi_mask(shape, labels, roi, idx)
+        if not np.any(mask):
+            continue
+        phase_id = _ti_phase_index(result.candidate_phase or result.phase_call or result.best_phase)
+        high = (
+            phase_id >= 0
+            and result.mapping_confidence == "HIGH_CONFIDENCE"
+            and result.indexability_tier == "INDEXABLE"
+            and result.phase_call not in {"AMBIGUOUS", "UNINDEXED"}
+        )
+        ambiguous = (not high) or result.phase_call == "AMBIGUOUS" or phase_id < 0
+        phase_index[mask] = phase_id
+        score[mask] = _safe_float(result.hybrid_score, _safe_float(result.match_score, np.nan))
+        score_margin[mask] = _safe_float(result.phase_margin, _safe_float(result.score_margin, np.nan))
+        ambiguous_mask[mask] = ambiguous
+        high_confidence_mask[mask] = high
+        indexability_score[mask] = _safe_float(result.indexability_score, 0.0)
+        indexability_tier[mask] = {"INDEXABLE": 0, "SCREENING_ONLY": 1, "NOT_INDEXABLE": 2}.get(
+            str(result.indexability_tier),
+            2,
+        )
+        roi_evidence.append(_stage2b_roi_evidence_record(roi, result))
+
+    arrays = {
+        "phase_index": "phase_index.npy",
+        "score": "score.npy",
+        "score_margin": "score_margin.npy",
+        "ambiguous_mask": "ambiguous_mask.npy",
+        "high_confidence_mask": "high_confidence_mask.npy",
+        "indexability_score": "indexability_score.npy",
+        "indexability_tier": "indexability_tier.npy",
+    }
+    values = {
+        "phase_index": phase_index,
+        "score": score,
+        "score_margin": score_margin,
+        "ambiguous_mask": ambiguous_mask,
+        "high_confidence_mask": high_confidence_mask,
+        "indexability_score": indexability_score,
+        "indexability_tier": indexability_tier,
+    }
+    for key, filename in arrays.items():
+        np.save(output_dir / filename, values[key])
+
+    manifest = {
+        "schema_version": "stage2b-py4dstem-evidence-v1",
+        "backend": "py4DSTEM_bragg_vector",
+        "method": "analytic_cif_template_screening",
+        "phase_names": ["Ti-bcc", "Ti-hcp"],
+        "arrays": arrays,
+        "label_conventions": {
+            "phase_index": {"0": "Ti-bcc", "1": "Ti-hcp", "-1": "unresolved_or_not_indexable"},
+            "indexability_tier": {"0": "INDEXABLE", "1": "SCREENING_ONLY", "2": "NOT_INDEXABLE"},
+        },
+        "roi_evidence": roi_evidence,
+    }
+    manifest_path = output_dir / "stage2b_standard_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
+    return manifest_path
+
+
+def _stage2b_roi_mask(
+    shape: tuple[int, int],
+    labels: np.ndarray | None,
+    roi: dict[str, Any],
+    fallback_idx: int,
+) -> np.ndarray:
+    mask = np.zeros(shape, dtype=bool)
+    cluster_id = roi.get("cluster_id")
+    if labels is not None and cluster_id is not None and labels.shape == shape:
+        mask |= labels == int(cluster_id)
+        return mask
+    bbox = roi.get("stage1_bbox") or roi.get("raw_bbox")
+    if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+        y0, y1, x0, x1 = [int(v) for v in bbox]
+        y0, y1 = max(0, y0), min(shape[0], y1)
+        x0, x1 = max(0, x0), min(shape[1], x1)
+        if y1 > y0 and x1 > x0:
+            mask[y0:y1, x0:x1] = True
+            return mask
+    if fallback_idx < mask.size:
+        y, x = divmod(fallback_idx, shape[1])
+        mask[y, x] = True
+    return mask
+
+
+def _stage2b_roi_evidence_record(roi: dict[str, Any], result: ROIIndexingResult) -> dict[str, Any]:
+    bragg_dir = Path(str(roi.get("bragg_summary_path", ""))).parent if roi.get("bragg_summary_path") else None
+    indexing_dir = Path(str(result.stage2a_bragg_summary_path)).parent if result.stage2a_bragg_summary_path else bragg_dir
+    paths = {
+        "raw_dp": str(roi.get("mean_dp_path") or roi.get("roi_data_path") or ""),
+        "detected_bragg_peaks": str((bragg_dir / "bragg_overlay.png") if bragg_dir else ""),
+        "template_overlay": str((indexing_dir / "template_match_overlay.png") if indexing_dir else ""),
+        "phase_orientation_topk": str((indexing_dir / "phase_orientation_topk.json") if indexing_dir else ""),
+    }
+    return {
+        "name": result.name,
+        "cluster_id": roi.get("cluster_id"),
+        "candidate_phase": result.candidate_phase,
+        "phase_call": result.phase_call,
+        "mapping_confidence": result.mapping_confidence,
+        "score": result.hybrid_score if result.hybrid_score is not None else result.match_score,
+        "margin": result.phase_margin if result.phase_margin is not None else result.score_margin,
+        "q_residual": result.mean_q_residual,
+        "indexability_score": result.indexability_score,
+        "indexability_tier": result.indexability_tier,
+        "primary_limiting_factors": result.primary_limiting_factors,
+        "paths": paths,
+    }
+
+
+def _ti_phase_index(value: Any) -> int:
+    text = str(value or "").lower()
+    if "bcc" in text:
+        return 0
+    if "hcp" in text:
+        return 1
+    return -1
+
+
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if not math.isfinite(number):
+        return float(default)
+    return number
+
+
 def _write_stage2b_phase_mapping_report(
     output_dir: Path,
     summary: dict[str, Any],
@@ -448,7 +696,7 @@ def _write_stage2b_phase_mapping_report(
     phase_map_path: Path | None,
     phase_legend_path: Path | None,
 ) -> tuple[Path, Path]:
-    """Write a human-readable Stage 2B phase-map interpretation report."""
+    """Write a human-readable Stage 2B candidate evidence report."""
     md_path = output_dir / "stage2_phase_mapping_report.md"
     html_path = output_dir / "stage2_phase_mapping_report.html"
     roi_results = summary.get("roi_results", [])
@@ -456,7 +704,7 @@ def _write_stage2b_phase_mapping_report(
     low_reasons = _phase_mapping_low_confidence_reasons(roi_results)
 
     lines: list[str] = [
-        "# Stage 2B Phase Mapping Report",
+        "# Stage 2B Candidate Evidence Report",
         "",
         f"**Status:** `{summary.get('status', 'unknown')}`",
         f"**Schema:** `{summary.get('schema_version', 'unknown')}`",
@@ -467,21 +715,20 @@ def _write_stage2b_phase_mapping_report(
         "",
     ]
     if phase_map_path is not None:
-        lines.append(f"- Phase map: `{phase_map_path.name}`")
+        lines.append(f"- Candidate evidence map: `{phase_map_path.name}`")
     if phase_legend_path is not None:
         lines.append(f"- Legend: `{phase_legend_path.name}`")
     lines.extend([
         "- Raw machine-readable results: `stage2_indexing_summary.json`",
         "",
-        "## What The Phase Map Means",
+        "## What The Candidate Evidence Map Means",
         "",
-        "The PNG phase map is a Stage 1 cluster-label map recolored by the best current Stage 2B candidate call. "
-        "It is not a point-by-point crystallographic indexing result like EBSD. Each pixel inherits the phase assigned "
-        "to its Stage 1 fingerprint cluster representative.",
+        "The PNG map is a Stage 1 cluster-label map recolored by the best current Stage 2B candidate evidence. "
+        "It is not a confirmed phase map and not a point-by-point crystallographic indexing result like EBSD.",
         "",
-        "## Phase Fractions From The Current Map",
+        "## Candidate Evidence Fractions",
         "",
-        "| Phase call | Fraction | Pixels | Source clusters |",
+        "| Evidence class | Fraction | Pixels | Source clusters |",
         "| --- | ---: | ---: | --- |",
     ])
     if phase_fractions:
@@ -494,6 +741,20 @@ def _write_stage2b_phase_mapping_report(
 
     lines.extend([
         "",
+        "## Failure Root-Cause Summary",
+        "",
+    ])
+    root_causes = _root_cause_summary(roi_results)
+    if root_causes:
+        lines.extend([
+            "| Primary limiting factor | ROI count |",
+            "| --- | ---: |",
+        ])
+        for factor, count in root_causes:
+            lines.append(f"| `{factor}` | {count} |")
+        lines.append("")
+
+    lines.extend([
         "## Why Confidence Is Low",
         "",
     ])
@@ -504,8 +765,8 @@ def _write_stage2b_phase_mapping_report(
         "",
         "## Per-ROI Matching Evidence",
         "",
-        "| ROI | Cluster | Phase call | Phase conf. | Orient. conf. | Mapping conf. | Evidence margin | Orient. margin | Radial support | Radial gate | Corr. score | Hybrid | Observable template matched | q residual | Ambiguity reason |",
-        "| --- | ---: | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
+        "| ROI | Cluster | Candidate evidence | Indexability | Indexability score | Phase conf. | Orient. conf. | Mapping conf. | Limiting factors | Evidence margin | Orient. margin | Radial support | Radial gate | Corr. score | Hybrid | Observable template matched | q residual | Ambiguity reason |",
+        "| --- | ---: | --- | --- | ---: | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
     ])
     cluster_by_name = {
         str(r.get("name")): r.get("cluster_id")
@@ -517,9 +778,12 @@ def _write_stage2b_phase_mapping_report(
             f"`{r.get('name', '?')}` | "
             f"{_fmt_report_value(cluster_by_name.get(str(r.get('name'))))} | "
             f"`{_fmt_report_value(r.get('candidate_phase'))}` | "
+            f"`{_fmt_report_value(r.get('indexability_tier'))}` | "
+            f"{_fmt_report_float(r.get('indexability_score'))} | "
             f"`{_fmt_report_value(r.get('phase_confidence'))}` | "
             f"`{_fmt_report_value(r.get('orientation_confidence'))}` | "
             f"`{_fmt_report_value(r.get('mapping_confidence'))}` | "
+            f"`{', '.join(r.get('primary_limiting_factors') or [])}` | "
             f"{_fmt_report_float(r.get('phase_margin'))} | "
             f"{_fmt_report_float(r.get('orientation_margin'))} | "
             f"{_fmt_report_float(r.get('radial_support_score'))} | "
@@ -579,12 +843,22 @@ def _phase_map_fractions(
 
     total_mapped = 0
     by_phase: dict[str, dict[str, Any]] = {}
+    ambiguous_pixels = 0
+    ambiguous_clusters: list[str] = []
     for cluster_id, r in best_by_cluster.items():
         count = int(np.sum(labels == cluster_id))
         if count <= 0:
             continue
         total_mapped += count
-        phase = str(r.get("candidate_phase"))
+        raw_phase = str(r.get("candidate_phase"))
+        if r.get("phase_call") == "AMBIGUOUS" or "/" in raw_phase:
+            phase = f"Unresolved {raw_phase} candidate group"
+            ambiguous_pixels += count
+            ambiguous_clusters.append(str(cluster_id))
+        elif str(r.get("phase_confidence")) == "HIGH_CONFIDENCE":
+            phase = f"Confirmed {raw_phase}"
+        else:
+            phase = f"Unresolved {raw_phase} candidate"
         row = by_phase.setdefault(phase, {"phase": phase, "pixels": 0, "clusters": []})
         row["pixels"] += count
         row["clusters"].append(str(cluster_id))
@@ -592,6 +866,9 @@ def _phase_map_fractions(
     if total_mapped <= 0:
         return []
     result = []
+    if any("Ti-bcc" in row["phase"] or "Ti-hcp" in row["phase"] for row in by_phase.values()):
+        for phase in ("Confirmed Ti-bcc", "Confirmed Ti-hcp"):
+            result.append({"phase": phase, "pixels": 0, "fraction": 0.0, "clusters": ""})
     for row in by_phase.values():
         result.append({
             "phase": row["phase"],
@@ -599,7 +876,30 @@ def _phase_map_fractions(
             "fraction": row["pixels"] / total_mapped,
             "clusters": ", ".join(row["clusters"]),
         })
+    if ambiguous_pixels > 0:
+        result.append({
+            "phase": "Ambiguous",
+            "pixels": ambiguous_pixels,
+            "fraction": ambiguous_pixels / total_mapped,
+            "clusters": ", ".join(ambiguous_clusters),
+        })
     return sorted(result, key=lambda x: x["pixels"], reverse=True)
+
+
+def _root_cause_summary(roi_results: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    counts: dict[str, int] = {}
+    for roi in roi_results:
+        for factor in roi.get("primary_limiting_factors") or []:
+            counts[str(factor)] = counts.get(str(factor), 0) + 1
+    order = [
+        "LOW_RADIAL_SUPPORT",
+        "LOW_MATCHED_TEMPLATE_FRACTION",
+        "HIGH_UNEXPLAINED_PEAK_FRACTION",
+        "LOW_PHASE_MARGIN",
+        "ZERO_ORIENTATION_MARGIN",
+        "INSUFFICIENT_CLEAN_PEAKS",
+    ]
+    return sorted(counts.items(), key=lambda item: (order.index(item[0]) if item[0] in order else len(order), item[0]))
 
 
 def _phase_mapping_low_confidence_reasons(roi_results: list[dict[str, Any]]) -> list[str]:
@@ -667,7 +967,7 @@ def _stage2b_report_html(
     body = [
         "<!doctype html>",
         "<html><head><meta charset=\"utf-8\">",
-        "<title>Stage 2B Phase Mapping Report</title>",
+        "<title>Stage 2B Candidate Evidence Report</title>",
         "<style>body{font-family:system-ui,-apple-system,sans-serif;margin:28px;line-height:1.45;color:#222;max-width:1200px}"
         "table{border-collapse:collapse;margin:14px 0;width:100%;font-size:13px}th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}"
         "th{background:#f4f4f4}code{background:#f5f5f5;padding:1px 4px;border-radius:3px}pre{white-space:pre-wrap;background:#fafafa;padding:16px;border:1px solid #ddd}"
@@ -677,7 +977,7 @@ def _stage2b_report_html(
     if phase_map_path is not None or phase_legend_path is not None:
         body.append('<div class="figs">')
         if phase_map_path is not None:
-            body.append(f'<figure><img src="{esc(phase_map_path.name)}" alt="phase map"><figcaption>Phase map</figcaption></figure>')
+            body.append(f'<figure><img src="{esc(phase_map_path.name)}" alt="candidate evidence map"><figcaption>Candidate evidence map</figcaption></figure>')
         if phase_legend_path is not None:
             body.append(f'<figure><img src="{esc(phase_legend_path.name)}" alt="phase legend"><figcaption>Legend</figcaption></figure>')
         body.append("</div>")
@@ -1130,6 +1430,14 @@ def _template_match_roi(
         orientation_confidence=orient_conf,
         mapping_confidence=mapping_conf,
         ambiguity_reason=resolution_reason,
+        primary_limiting_factors=_primary_limiting_factors(
+            radial_support_score=radial_support_score,
+            matched_template_fraction=best_residual.get("matched_observable_template_fraction") or best_residual.get("matched_template_fraction"),
+            unexplained_peak_fraction=best_residual.get("unexplained_experiment_fraction"),
+            phase_margin=phase_margin,
+            orientation_margin=orientation_margin,
+            median_clean_peaks=(roi.get("bragg_qc") or {}).get("median_clean_peaks_per_DP"),
+        ),
     )
 
 
@@ -1142,6 +1450,16 @@ def _load_roi_match_pattern(roi: dict[str, Any]) -> np.ndarray | None:
     peak-count scoring.
     """
     roi_name = roi.get("name", "unknown")
+    mean_dp_path = roi.get("mean_dp_path")
+    if mean_dp_path:
+        try:
+            arr = np.asarray(np.load(mean_dp_path), dtype=np.float32)
+            if arr.ndim == 2:
+                return arr
+            log.warning("Mean DP for %s must be 2D, got shape %s", roi_name, arr.shape)
+        except (OSError, ValueError) as exc:
+            log.warning("Could not load mean DP for %s: %s", roi_name, exc)
+
     roi_data_path = roi.get("roi_data_path")
     if roi_data_path:
         try:
@@ -2264,6 +2582,32 @@ def _orientation_confidence(
     if orientation_margin >= threshold:
         return "MEDIUM_CONFIDENCE"
     return "LOW_CONFIDENCE"
+
+
+def _primary_limiting_factors(
+    *,
+    radial_support_score: float | None,
+    matched_template_fraction: float | None,
+    unexplained_peak_fraction: float | None,
+    phase_margin: float | None,
+    orientation_margin: float | None,
+    median_clean_peaks: float | None,
+) -> list[str]:
+    """Classify why a Stage 2B candidate call remains low-confidence."""
+    factors: list[str] = []
+    if radial_support_score is not None and float(radial_support_score) < 0.25:
+        factors.append("LOW_RADIAL_SUPPORT")
+    if matched_template_fraction is not None and float(matched_template_fraction) < 0.30:
+        factors.append("LOW_MATCHED_TEMPLATE_FRACTION")
+    if unexplained_peak_fraction is not None and float(unexplained_peak_fraction) > 0.50:
+        factors.append("HIGH_UNEXPLAINED_PEAK_FRACTION")
+    if phase_margin is not None and float(phase_margin) < 0.08:
+        factors.append("LOW_PHASE_MARGIN")
+    if orientation_margin is None or float(orientation_margin) < 0.05:
+        factors.append("ZERO_ORIENTATION_MARGIN")
+    if median_clean_peaks is not None and float(median_clean_peaks) < 6.0:
+        factors.append("INSUFFICIENT_CLEAN_PEAKS")
+    return factors
 
 
 def _combined_mapping_confidence(phase_confidence: str, orientation_confidence: str) -> str:

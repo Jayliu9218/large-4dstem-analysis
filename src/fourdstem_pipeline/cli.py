@@ -8,6 +8,10 @@
     Execute Stage 2A ROI Bragg detection on a Stage-1 output directory.
 ``fourdstem-stage2b``
     Create the Stage 2B indexing summary contract from Stage 2A outputs.
+``fourdstem-stage2c``
+    Standardise pyxem pattern-matching validation outputs.
+``fourdstem-evidence-qc``
+    Run P0 Stage 2A evidence trustworthiness diagnostics.
 """
 
 from __future__ import annotations
@@ -195,6 +199,40 @@ def stage2b() -> None:
     print(f"  Output: {summary.get('output_dir', '?')}\n")
 
 
+def evidence_qc() -> None:
+    """``fourdstem-evidence-qc`` - run P0 evidence trustworthiness diagnostics."""
+    from .evidence_qc import main as evidence_qc_main
+
+    evidence_qc_main()
+
+
+def stage2c() -> None:
+    """``fourdstem-stage2c`` - standardise pyxem validation outputs."""
+    parser = argparse.ArgumentParser(
+        description="4D-STEM Stage 2C: pyxem Pattern-Matching Validation",
+    )
+    parser.add_argument(
+        "--config",
+        default="configs/pipeline.yaml",
+        help="Path to unified or Stage 2C YAML configuration  [default: configs/pipeline.yaml]",
+    )
+    args = parser.parse_args()
+
+    from .pyxem_validation import run_stage2c_validation
+
+    try:
+        summary = run_stage2c_validation(config=_extract_stage2c_config(args.config))
+    except Exception as exc:
+        print(f"\nStage 2C failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    status = summary.get("status", "unknown")
+    print(f"\nStage 2C pyxem validation: {status}.")
+    print(f"  Output: {summary.get('output_dir', '?')}\n")
+    if status == "failed":
+        sys.exit(1)
+
+
 def bin_export() -> None:
     """``fourdstem-bin-export`` — bin raw data and export to EMD/H5."""
     parser = argparse.ArgumentParser(
@@ -328,6 +366,24 @@ def _extract_stage2b_config(config_path: str | Path) -> str | dict[str, Any]:
     stage2b.setdefault("stage2_dir", str(default_stage2a_dir))
     stage2b.setdefault("output_dir", None)
     return stage2b
+
+
+def _extract_stage2c_config(config_path: str | Path) -> str | dict[str, Any]:
+    """Return a Stage 2C config, extracting from unified pipeline YAML if needed."""
+    cfg = _load_yaml_mapping(config_path)
+    if "stage2c" not in cfg:
+        return str(config_path)
+    project_cfg = cfg.get("project") or {}
+    stage2a_cfg = cfg.get("stage2a") or {}
+    stage2b_cfg = cfg.get("stage2b") or {}
+    stage1_dir = Path(project_cfg.get("output_dir", "outputs"))
+    default_stage2a_dir = Path(stage2a_cfg.get("output_dir") or stage1_dir / "stage2" / "roi_bragg")
+    default_stage2b_dir = Path(stage2b_cfg.get("output_dir") or default_stage2a_dir / "stage2b_indexing")
+    stage2c_cfg = dict(cfg.get("stage2c") or {})
+    stage2c_cfg.setdefault("stage2_dir", str(default_stage2a_dir))
+    stage2c_cfg.setdefault("stage2b_dir", str(default_stage2b_dir))
+    stage2c_cfg.setdefault("output_dir", None)
+    return stage2c_cfg
 
 
 def _load_yaml_mapping(path: str | Path) -> dict[str, Any]:
@@ -663,7 +719,7 @@ def _warn_unknown_keys(cfg: dict[str, Any], checks: list[dict[str, Any]]) -> Non
     """Detect unknown top-level keys and emit warnings."""
     known = {
         "pipeline", "project", "data", "preprocess", "geometry", "virtual_images",
-        "phase_screening", "orientation", "roi_bragg", "sample_mask", "stage2a", "stage2b",
+        "phase_screening", "orientation", "roi_bragg", "sample_mask", "stage2a", "stage2b", "stage2c", "consensus",
     }
     unknown = sorted(set(cfg) - known)
     for key in unknown:
@@ -835,11 +891,13 @@ def _jsonable(value: Any) -> Any:
 
 
 _SUBCOMMANDS: dict[str, str] = {
-    "pipeline": "Execute the unified Stage 1 -> 2A -> 2B pipeline",
+    "pipeline": "Execute the unified Stage 1 -> 2A -> 2B -> 2C pipeline",
     "run": "Execute the Stage-1 workflow",
     "dry_run": "Validate configuration without loading data",
     "stage2": "Execute Stage 2A ROI Bragg detection",
     "stage2b": "Create the Stage 2B indexing summary contract",
+    "stage2c": "Standardise pyxem pattern-matching validation outputs",
+    "evidence-qc": "Run P0 Stage 2A evidence trustworthiness diagnostics",
     "bin-export": "Bin raw data (R_bin, Q_bin) and export to EMD/H5",
     "crop-export": "Crop navigation dimensions and export to EMD/H5",
 }
@@ -866,6 +924,10 @@ def _main() -> None:
         stage2()
     elif subcommand == "stage2b":
         stage2b()
+    elif subcommand == "stage2c":
+        stage2c()
+    elif subcommand == "evidence-qc":
+        evidence_qc()
     elif subcommand == "bin-export":
         bin_export()
     elif subcommand == "crop-export":

@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .contracts import is_roi_ready_for_indexing
+from .contracts import roi_indexing_blockers, roi_indexing_readiness
 
 
 def save_stage2_report(output_dir: Path, summary: dict[str, Any]) -> tuple[Path, Path]:
@@ -31,7 +31,7 @@ def save_stage2_report(output_dir: Path, summary: dict[str, Any]) -> tuple[Path,
     md_path = output_dir / "stage2_report.md"
     html_path = output_dir / "stage2_report.html"
 
-    markdown = _render_stage2_markdown(summary)
+    markdown = _ascii_safe_text(_render_stage2_markdown(summary))
     md_path.write_text(markdown, encoding="utf-8")
     html_path.write_text(_render_stage2_html(markdown, summary), encoding="utf-8")
     return md_path, html_path
@@ -130,6 +130,7 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
     provenance = summary.get("provenance", {})
     roi_results: list[dict[str, Any]] = summary.get("roi_results", [])
     errors = summary.get("errors")
+    dedup = summary.get("roi_deduplication") or {}
 
     # --- Header ----------------------------------------------------------
     lines.extend([
@@ -186,6 +187,8 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
         "## Overview",
         "",
         f"- ROIs processed: **{len(roi_results)}**",
+        f"- Unique ROIs after deduplication: **{dedup.get('unique_roi_count', len(roi_results))}**",
+        f"- Duplicate ROIs dropped: **{dedup.get('duplicate_roi_count', 0)}**",
         f"- Succeeded: **{n_success}**",
         f"- Failed: **{n_failed}**",
         f"- Total Bragg peaks: **{total_peaks}**",
@@ -196,8 +199,8 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
         lines.extend([
             "## ROI Results",
             "",
-            "| # | Name | Cluster | Reason | Stage1 BBox | Raw BBox | Nav | Sig | Peaks | Beam Source | BG Frac | Sample Cov | Verdict |",
-            "| --- | --- | ---: | --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | --- |",
+            "| # | Name | Cluster | Reason | Stage1 BBox | Raw BBox | Nav | Sig | Peaks | Clean Median | >=6 DP | Beam Source | BG Frac | Sample Cov | Readiness |",
+            "| --- | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- |",
         ])
         for i, r in enumerate(roi_results, 1):
             error = r.get("error")
@@ -209,6 +212,7 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
                 )
                 continue
 
+            bq = r.get("bragg_qc") or {}
             verdict = _indexing_verdict(r)
             lines.append(
                 f"| {i} "
@@ -220,6 +224,8 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
                 f"| `{r.get('nav_shape', '?')}` "
                 f"| `{r.get('sig_shape', '?')}` "
                 f"| **{r.get('n_bragg_peaks', 0)}** "
+                f"| {_fmt_optional_float(bq.get('median_clean_peaks_per_DP'))} "
+                f"| {_fmt_frac(bq.get('fraction_DP_with_>=6_peaks'))} "
                 f"| `{r.get('beam_center_source', '?')}` "
                 f"| {_fmt_frac(r.get('background_fraction'))} "
                 f"| {_fmt_frac(r.get('sample_mask_coverage'))} "
@@ -242,22 +248,27 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
             "detection may be picking up non-diffraction signals (central beam",
             "tail, edge artifacts, hot pixels, or peak splitting).",
             "",
-            "| ROI | Peaks | Mean Int | Centre Zone | Edge | Duplicates | R Mean | R Std | BC Err |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| ROI | Peaks | Clean Median | >=4 DP | >=6 DP | >=8 DP | Per-DP Dup Med | Per-DP Dup P90 | Split Warn | BVM Crowding | Centre Tail | Edge | R Mean | R Std | BC Err |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
         ])
         for r in roi_with_qc:
             bq = r.get("bragg_qc", {})
             r_mean = _fmt_optional_float(bq.get("radial_distance_mean"))
             r_std = _fmt_optional_float(bq.get("radial_distance_std"))
             bc_err = _fmt_optional_float(bq.get("beam_center_error_estimate"))
-            mean_int = bq.get("mean_peak_intensity", 0)
             lines.append(
                 f"| `{r.get('name', '?')}` "
                 f"| {bq.get('peak_pixel_count', 0)} "
-                f"| {mean_int:.1f} "
-                f"| {bq.get('forbidden_center_zone_fraction', 0):.1%} "
+                f"| {_fmt_optional_float(bq.get('median_clean_peaks_per_DP'))} "
+                f"| {_fmt_frac(bq.get('fraction_DP_with_>=4_peaks'))} "
+                f"| {_fmt_frac(bq.get('fraction_DP_with_>=6_peaks'))} "
+                f"| {_fmt_frac(bq.get('fraction_DP_with_>=8_peaks'))} "
+                f"| {_fmt_frac(bq.get('duplicate_fraction_per_pattern_median'))} "
+                f"| {_fmt_frac(bq.get('duplicate_fraction_per_pattern_p90'))} "
+                f"| `{bool(bq.get('peak_splitting_warning', False))}` "
+                f"| {bq.get('BVM_duplicate_peak_fraction', bq.get('duplicate_peak_fraction', 0)):.1%} "
+                f"| {bq.get('center_tail_peak_fraction', bq.get('forbidden_center_zone_fraction', 0)):.1%} "
                 f"| {bq.get('edge_peak_fraction', 0):.1%} "
-                f"| {bq.get('duplicate_peak_fraction', 0):.1%} "
                 f"| {r_mean} "
                 f"| {r_std} "
                 f"| {bc_err} |"
@@ -273,17 +284,16 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
         lines.append("")
 
     # --- Indexing candidates ---------------------------------------------
-    ready = [r for r in roi_results if is_roi_ready_for_indexing(r)]
-    not_ready = [r for r in roi_results if not r.get("error") and not is_roi_ready_for_indexing(r)]
+    ready = [r for r in roi_results if roi_indexing_readiness(r) == "READY_FOR_INDEXING"]
+    screening = [r for r in roi_results if roi_indexing_readiness(r) == "READY_FOR_SCREENING_ONLY"]
+    not_ready = [r for r in roi_results if not r.get("error") and roi_indexing_readiness(r) == "NOT_INDEXABLE"]
     failed = [r for r in roi_results if r.get("error")]
 
     if ready:
         lines.extend([
-            "## [READY] Ready for Stage 2B Indexing",
+            "## READY_FOR_INDEXING",
             "",
-            "These ROIs have non-zero Bragg peaks, acceptable background,",
-            "and a recorded beam centre.  They can proceed to",
-            "phase/orientation indexing.",
+            "These ROIs meet the conservative per-DP Bragg evidence gate.",
             "",
         ])
         for r in ready:
@@ -295,12 +305,25 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
             )
         lines.append("")
 
+    if screening:
+        lines.extend([
+            "## READY_FOR_SCREENING_ONLY",
+            "",
+            "These ROIs have peaks but do not meet indexing-grade evidence criteria:",
+            "",
+        ])
+        for r in screening:
+            issues = _indexing_blockers(r)
+            lines.append(
+                f"- **`{r.get('name')}`**: {', '.join(issues)}"
+            )
+        lines.append("")
+
     if not_ready:
         lines.extend([
-            "## [REVIEW] Not Ready for Stage 2B",
+            "## NOT_INDEXABLE",
             "",
-            "These ROIs succeeded but have issues that should be reviewed",
-            "before indexing:",
+            "These ROIs have critical evidence-quality blockers:",
             "",
         ])
         for r in not_ready:
@@ -341,15 +364,9 @@ def _render_stage2_markdown(summary: dict[str, Any]) -> str:
         "",
         "### Verdicts",
         "",
-        "- **[READY] Ready**: ROI has non-zero Bragg peaks, low background,",
-        "  has a recorded beam centre, and sample coverage is acceptable.",
-        "  Can proceed to Stage 2B phase/orientation indexing.",
-        "- **[REVIEW] Review**: ROI has Bragg peaks but also warnings (high",
-        "  background, missing sample coverage, zero peaks, etc.).",
-        "  Review the diagnostic outputs before using for indexing.",
-        "- **[SKIP] Skip**: ROI failed Bragg detection or has critical",
-        "  validation failures (zero Bragg peaks, entirely outside",
-        "  sample, etc.).  Do NOT use for indexing.",
+        "- **READY_FOR_INDEXING**: ROI meets the conservative per-DP clean-peak gate and has no severe artifact warning.",
+        "- **READY_FOR_SCREENING_ONLY**: ROI has peaks, but evidence is not strong enough for phase/orientation indexing.",
+        "- **NOT_INDEXABLE**: ROI has critical evidence failures such as too few peaks, splitting, severe artifacts, or invalid sample coverage.",
         "",
         "### Column Notes",
         "",
@@ -496,46 +513,19 @@ def _render_stage2_html(markdown: str, summary: dict[str, Any]) -> str:
 
 def _indexing_verdict(roi: dict[str, Any]) -> str:
     """Return a human-readable verdict for this ROI."""
-    n_peaks = roi.get("n_bragg_peaks", 0) or 0
-    bg_frac = roi.get("background_fraction")
-    sample_cov = roi.get("sample_mask_coverage")
-    warning = roi.get("cluster_validation_warning")
-    beam_source = roi.get("beam_center_source", "")
-
-    if n_peaks == 0:
-        return "[SKIP] Skip (0 peaks)"
-    if bg_frac is not None and bg_frac > 0.5:
-        return "[SKIP] Skip (>50% bg)"
-    if sample_cov is not None and sample_cov == 0.0:
-        return "[SKIP] Skip (sample 0%)"
-    if beam_source == "detector_center_fallback":
-        return "[REVIEW] Review (no calib)"
-    if warning:
-        return "[REVIEW] Review"
-    return "[READY] Ready"
+    return str(roi.get("indexing_readiness") or roi_indexing_readiness(roi))
 
 
 def _indexing_blockers(roi: dict[str, Any]) -> list[str]:
     """List reasons why an ROI is not ready for Stage 2B."""
-    issues: list[str] = []
-    n_peaks = roi.get("n_bragg_peaks", 0) or 0
+    issues = list(roi.get("indexing_blockers") or roi_indexing_blockers(roi))
     bg_frac = roi.get("background_fraction")
     sample_cov = roi.get("sample_mask_coverage")
-    beam_source = roi.get("beam_center_source", "")
     warning = roi.get("cluster_validation_warning")
-
-    if n_peaks == 0:
-        issues.append("zero Bragg peaks")
-    if bg_frac is not None and bg_frac > 0.5:
-        issues.append(f"high background ({bg_frac:.1%})")
-    elif bg_frac is not None and bg_frac > 0.1:
+    if bg_frac is not None and 0.1 < bg_frac <= 0.5:
         issues.append(f"moderate background ({bg_frac:.1%})")
-    if sample_cov is not None and sample_cov == 0.0:
-        issues.append("zero sample coverage")
-    elif sample_cov is not None and sample_cov < 0.3:
+    if sample_cov is not None and 0.0 < sample_cov < 0.3:
         issues.append(f"low sample coverage ({sample_cov:.1%})")
-    if beam_source == "detector_center_fallback":
-        issues.append("no calibrated beam centre")
     if warning:
         issues.append(f"validation warning: {warning}")
 
@@ -552,6 +542,22 @@ def _escape_md(text: str) -> str:
 def _html_escape(text: str) -> str:
     """Escape HTML special characters."""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def _ascii_safe_text(text: str) -> str:
+    """Keep Stage 2A reports ASCII-safe for terminals and CI artifacts."""
+    replacements = {
+        "≤": "<=",
+        "≥": ">=",
+        "±": "+/-",
+        "–": "-",
+        "—": "-",
+        "→": "->",
+        "卤": "+/-",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text.encode("ascii", "replace").decode("ascii")
 
 
 def _fmt_frac(value: float | None) -> str:

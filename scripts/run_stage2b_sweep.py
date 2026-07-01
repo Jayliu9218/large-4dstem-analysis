@@ -40,6 +40,13 @@ DEFAULT_SWEEP_GRID: dict[str, list[Any]] = {
     "reciprocal_pixels_per_inv_angstrom": [53.1, 55.9, 58.7],
 }
 
+P1_EVIDENCE_SWEEP_GRID: dict[str, list[Any]] = {
+    "k_max": [1.4, 1.7, 2.0],
+    "reciprocal_scale_factor": [0.97, 0.98, 0.99, 1.0, 1.01, 1.02, 1.03],
+    "beam_center_offset_yx": [(0.0, 0.0), (-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (-2.0, 0.0), (2.0, 0.0), (0.0, -2.0), (0.0, 2.0)],
+    "bragg_threshold_mode": ["conservative", "medium"],
+}
+
 
 def _parse_sweep_grid(raw: dict[str, str]) -> dict[str, list[Any]]:
     """Convert CLI string values to typed lists."""
@@ -122,9 +129,21 @@ def run_sweep(
 
         # Deep-copy base config and override sweep params
         cfg = copy.deepcopy(base_cfg)
+        cfg["output_dir"] = str(run_dir / "stage2b_indexing")
         tg = cfg.setdefault("template_generation", {})
         for key, val in combo.items():
-            tg[key] = val
+            if key == "reciprocal_scale_factor":
+                base_scale = float(tg.get("reciprocal_pixels_per_inv_angstrom", 55.9) or 55.9)
+                tg["reciprocal_pixels_per_inv_angstrom"] = base_scale * float(val)
+            elif key == "k_max":
+                tg["k_max"] = float(val)
+                tg["reciprocal_radius"] = float(val)
+            elif key == "beam_center_offset_yx":
+                cfg["stage2_dir"] = str(_stage2_dir_with_beam_offset(Path(cfg["stage2_dir"]), run_dir, val))
+            elif key == "bragg_threshold_mode":
+                cfg.setdefault("evidence_sweep", {})["bragg_threshold_mode"] = str(val)
+            else:
+                tg[key] = val
             # orientation_step_deg controls the step; regenerate orientations
             if key == "orientation_step_deg":
                 tg["orientations_deg"] = None  # force auto-generation
@@ -151,10 +170,13 @@ def run_sweep(
             candidate = r.get("candidate_phase") or "none"
             winners[roi_name] = {
                 "candidate": candidate,
+                "phase_call": r.get("phase_call"),
                 "score": r.get("match_score"),
                 "margin": r.get("score_margin"),
                 "confidence": r.get("phase_confidence"),
                 "matched_frac": r.get("matched_template_fraction"),
+                "radial_support": r.get("radial_support_score"),
+                "q_residual": r.get("mean_q_residual"),
             }
 
         grid_runs.append({
@@ -203,6 +225,16 @@ def run_sweep(
         "dominant_candidate": (
             list(stability_report.values())[0]["winner"]
             if unanimous and stability_report else None
+        ),
+        "best_calibration_candidate": _best_calibration_candidate(grid_runs),
+        "best_K_MAX": _best_param_value(grid_runs, "k_max"),
+        "stability_of_phase_call": {
+            name: info["winner_fraction"] for name, info in stability_report.items()
+        },
+        "sensitivity_flags": (
+            ["PARAMETER_SENSITIVE_LOW_CONFIDENCE"]
+            if any(not info["stable"] or info["winner_fraction"] < 0.8 for info in stability_report.values())
+            else []
         ),
     }
 
@@ -288,6 +320,73 @@ def _load_stage2b_sweep_config(config_path: Path) -> dict[str, Any]:
     return stage2b
 
 
+def _stage2_dir_with_beam_offset(stage2_dir: Path, run_dir: Path, offset: Any) -> Path:
+    """Create a temporary Stage 2A summary with beam center offset applied."""
+    if not stage2_dir.is_absolute():
+        stage2_dir = Path.cwd() / stage2_dir
+    dy, dx = [float(v) for v in offset]
+    src = stage2_dir / "stage2_summary.json"
+    dst_dir = run_dir / "stage2a_beam_offset"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    summary = json.loads(src.read_text(encoding="utf-8"))
+    for roi in summary.get("roi_results", []):
+        if roi.get("beam_center_yx"):
+            roi["beam_center_yx"] = [
+                float(roi["beam_center_yx"][0]) + dy,
+                float(roi["beam_center_yx"][1]) + dx,
+            ]
+    summary["beam_center_sweep_offset_yx"] = [dy, dx]
+    (dst_dir / "stage2_summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+    return dst_dir
+
+
+def _best_param_value(grid_runs: list[dict[str, Any]], key: str) -> Any:
+    """Return the parameter value from the run with strongest median evidence."""
+    scored: list[tuple[tuple[float, float, float], Any]] = []
+    for run in grid_runs:
+        if "error" in run or key not in run.get("params", {}):
+            continue
+        winners = list((run.get("winners") or {}).values())
+        if not winners:
+            continue
+        radial = _median([w.get("radial_support") for w in winners])
+        matched = _median([w.get("matched_frac") for w in winners])
+        margin = _median([w.get("margin") for w in winners])
+        scored.append(((radial, matched, margin), run["params"][key]))
+    if not scored:
+        return None
+    return max(scored, key=lambda item: item[0])[1]
+
+
+def _best_calibration_candidate(grid_runs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    scored: list[tuple[tuple[float, float, float], dict[str, Any]]] = []
+    for run in grid_runs:
+        if "error" in run:
+            continue
+        params = run.get("params", {})
+        winners = list((run.get("winners") or {}).values())
+        if not winners:
+            continue
+        score = (
+            _median([w.get("radial_support") for w in winners]),
+            _median([w.get("matched_frac") for w in winners]),
+            _median([w.get("margin") for w in winners]),
+        )
+        scored.append((score, {
+            "reciprocal_scale_factor": params.get("reciprocal_scale_factor"),
+            "beam_center_offset_yx": params.get("beam_center_offset_yx"),
+            "bragg_threshold_mode": params.get("bragg_threshold_mode"),
+        }))
+    if not scored:
+        return None
+    return max(scored, key=lambda item: item[0])[1]
+
+
+def _median(values: list[Any]) -> float:
+    vals = [float(v) for v in values if v is not None]
+    return float(np.median(vals)) if vals else 0.0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Stage 2B parameter stability sweep",
@@ -315,6 +414,10 @@ def main() -> None:
         help="Comma-separated reciprocal_pixels_per_inv_angstrom values (default: 53.1,55.9,58.7)",
     )
     parser.add_argument(
+        "--p1-evidence-grid", action="store_true",
+        help="Use P1 grid: K_MAX 1.4/1.7/2.0, q calibration +/-1-3%, beam center +/-1-2 px, Bragg threshold labels.",
+    )
+    parser.add_argument(
         "--log-level", default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging level",
@@ -329,7 +432,9 @@ def main() -> None:
 
     # Build sweep grid from CLI or defaults
     sweep_grid: dict[str, list[Any]] = {}
-    if args.peak_sigma:
+    if args.p1_evidence_grid:
+        sweep_grid = dict(P1_EVIDENCE_SWEEP_GRID)
+    elif args.peak_sigma:
         sweep_grid["peak_sigma_px"] = [float(v.strip()) for v in args.peak_sigma.split(",")]
     if args.orient_step:
         sweep_grid["orientation_step_deg"] = [float(v.strip()) for v in args.orient_step.split(",")]

@@ -16,6 +16,11 @@ from typing import Any, Literal
 AxisOrder = Literal["nav_y_nav_x_q_y_q_x"]
 BBoxOrder = Literal["y0_y1_x0_x1"]
 CenterOrder = Literal["y_x"]
+ROIReadiness = Literal[
+    "READY_FOR_INDEXING",
+    "READY_FOR_SCREENING_ONLY",
+    "NOT_INDEXABLE",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,29 +97,78 @@ class DiffractionCalibration:
         )
 
 
-def is_roi_ready_for_indexing(roi: dict[str, Any]) -> bool:
-    """Return True when a Stage 2A ROI can proceed to Stage 2B indexing.
-
-    This is the shared acceptance rule used by Stage 2A reports and the
-    Stage 2B indexing handoff. Keep it here so those surfaces cannot drift.
-    """
-    if roi.get("error"):
-        return False
-
-    n_peaks = roi.get("n_bragg_peaks", 0) or 0
+def roi_indexing_blockers(roi: dict[str, Any]) -> list[str]:
+    """Return evidence-quality blockers for using a Stage 2A ROI in indexing."""
+    issues: list[str] = []
+    bq = roi.get("bragg_qc") or {}
+    n_peaks = int(roi.get("n_bragg_peaks", 0) or 0)
     bg_frac = roi.get("background_fraction")
     sample_cov = roi.get("sample_mask_coverage")
     beam_source = roi.get("beam_center_source", "")
 
+    median_clean = bq.get("median_clean_peaks_per_DP")
+    frac_ge6 = bq.get("fraction_DP_with_>=6_peaks")
+    edge_frac = float(bq.get("edge_peak_fraction", 0.0) or 0.0)
+    center_frac = float(
+        bq.get("center_tail_peak_fraction", bq.get("forbidden_center_zone_fraction", 0.0)) or 0.0
+    )
+    splitting = bool(bq.get("peak_splitting_warning", False))
+
+    if roi.get("error"):
+        issues.append(f"ROI failed: {roi.get('error')}")
     if n_peaks <= 0:
-        return False
+        issues.append("zero Bragg peaks")
     if bg_frac is not None and bg_frac > 0.5:
-        return False
+        issues.append(f"high background ({bg_frac:.1%})")
     if sample_cov is not None and sample_cov == 0.0:
-        return False
+        issues.append("zero sample coverage")
     if beam_source == "detector_center_fallback":
-        return False
-    return True
+        issues.append("no calibrated beam center")
+    if median_clean is None:
+        issues.append("missing per-DP clean peak metric")
+    elif float(median_clean) < 6.0:
+        issues.append(f"median clean peaks per DP < 6 ({float(median_clean):.2f})")
+    if frac_ge6 is None:
+        issues.append("missing fraction DP with >=6 peaks")
+    elif float(frac_ge6) < 0.5:
+        issues.append(f"fraction DP with >=6 peaks < 0.5 ({float(frac_ge6):.3f})")
+    if splitting:
+        issues.append("per-DP duplicate/peak-splitting warning")
+    if edge_frac > 0.3:
+        issues.append(f"high edge peak fraction ({edge_frac:.1%})")
+    if center_frac > 0.3:
+        issues.append(f"high center-tail peak fraction ({center_frac:.1%})")
+    return issues
+
+
+def roi_indexing_readiness(roi: dict[str, Any]) -> ROIReadiness:
+    """Classify Stage 2A evidence quality for downstream indexing."""
+    explicit = roi.get("indexing_readiness")
+    if explicit in ("READY_FOR_INDEXING", "READY_FOR_SCREENING_ONLY", "NOT_INDEXABLE"):
+        return explicit
+    blockers = roi_indexing_blockers(roi)
+    if not blockers:
+        return "READY_FOR_INDEXING"
+    if roi.get("error"):
+        return "NOT_INDEXABLE"
+    if int(roi.get("n_bragg_peaks", 0) or 0) <= 0:
+        return "NOT_INDEXABLE"
+    bq = roi.get("bragg_qc") or {}
+    severe_artifact = (
+        bool(bq.get("peak_splitting_warning", False))
+        or float(bq.get("edge_peak_fraction", 0.0) or 0.0) > 0.5
+        or float(bq.get("center_tail_peak_fraction", bq.get("forbidden_center_zone_fraction", 0.0)) or 0.0) > 0.5
+    )
+    bg_frac = roi.get("background_fraction")
+    sample_cov = roi.get("sample_mask_coverage")
+    if severe_artifact or (bg_frac is not None and bg_frac > 0.5) or sample_cov == 0.0:
+        return "NOT_INDEXABLE"
+    return "READY_FOR_SCREENING_ONLY"
+
+
+def is_roi_ready_for_indexing(roi: dict[str, Any]) -> bool:
+    """Return True only for Stage 2A ROIs with indexing-grade evidence."""
+    return roi_indexing_readiness(roi) == "READY_FOR_INDEXING"
 
 
 @dataclass

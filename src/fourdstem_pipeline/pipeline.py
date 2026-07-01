@@ -1,6 +1,6 @@
-"""Unified three-stage pipeline orchestration.
+"""Unified multi-stage pipeline orchestration.
 
-This module keeps the existing Stage 1, Stage 2A, and Stage 2B entry points
+This module keeps the existing Stage 1, Stage 2A, Stage 2B, and validation entry points
 intact, but lets users drive them from one nested YAML config.
 """
 
@@ -19,6 +19,8 @@ from .stage2 import run_stage2
 from .workflow import WorkflowResult, run_workflow
 from .roi_bragg import Stage2Result
 from .indexing import run_stage2_indexing
+from .pyxem_validation import run_stage2c_validation
+from .consensus import run_consensus
 
 log = get_logger(__name__)
 
@@ -47,6 +49,13 @@ _STAGE_ALIASES = {
     "stage2b": "stage2b",
     "stage_2b": "stage2b",
     "indexing": "stage2b",
+    "stage2c": "stage2c",
+    "stage_2c": "stage2c",
+    "pyxem": "stage2c",
+    "pyxem_validation": "stage2c",
+    "consensus": "consensus",
+    "stage2d": "consensus",
+    "stage_2d": "consensus",
 }
 
 
@@ -74,7 +83,7 @@ class PipelineStageRecord:
 
 @dataclass(slots=True)
 class PipelineResult:
-    """Aggregated result from the unified Stage 1 -> 2A -> 2B pipeline."""
+    """Aggregated result from the unified Stage 1 -> 2A -> 2B -> 2C pipeline."""
 
     output_dir: Path
     summary_path: Path
@@ -82,6 +91,8 @@ class PipelineResult:
     stage1: WorkflowResult | None = None
     stage2a: Stage2Result | None = None
     stage2b: dict[str, Any] | None = None
+    stage2c: dict[str, Any] | None = None
+    consensus: dict[str, Any] | None = None
     errors: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -102,6 +113,8 @@ def run_pipeline(
     stage1_result: WorkflowResult | None = None
     stage2a_result: Stage2Result | None = None
     stage2b_result: dict[str, Any] | None = None
+    stage2c_result: dict[str, Any] | None = None
+    consensus_result: dict[str, Any] | None = None
 
     log.info("Unified pipeline starting: stages=%s output=%s", stages, output_dir)
 
@@ -136,7 +149,7 @@ def run_pipeline(
         else:
             try:
                 stage2a_cfg = _stage2a_config(cfg, stage1_result.output_dir)
-                stage2a_result = run_stage2(stage2a_cfg)
+                stage2a_result = run_stage2(config=stage2a_cfg)
                 stage2a_errors = [
                     {"roi": r.name, "error": r.error}
                     for r in stage2a_result.roi_results
@@ -200,6 +213,86 @@ def run_pipeline(
             skipped_reason="Not listed in pipeline.stages.",
         )
 
+    if "stage2c" in stages:
+        if "stage2b" in stages and records.get("stage2b") and records["stage2b"].status != "success":
+            records["stage2c"] = PipelineStageRecord(
+                name="stage2c",
+                status="skipped",
+                skipped_reason="Stage 2B did not complete successfully.",
+            )
+        else:
+            try:
+                stage2c_cfg = _stage2c_config(
+                    cfg,
+                    stage2a_result.output_dir if stage2a_result is not None else None,
+                    Path(str(stage2b_result.get("output_dir"))) if stage2b_result and stage2b_result.get("output_dir") else None,
+                )
+                stage2c_result = run_stage2c_validation(stage2c_cfg)
+                stage2c_errors = list(stage2c_result.get("errors") or [])
+                status = str(stage2c_result.get("status", "success"))
+                records["stage2c"] = PipelineStageRecord(
+                    name="stage2c",
+                    status=status,
+                    output_dir=str(stage2c_result.get("output_dir")) if stage2c_result.get("output_dir") else None,
+                    summary_path=str(Path(str(stage2c_result.get("output_dir"))) / "stage2c_summary.json")
+                    if stage2c_result.get("output_dir") else None,
+                    errors=stage2c_errors,
+                )
+                if status == "failed":
+                    errors.extend({"stage": "stage2c", **err} if isinstance(err, dict) else {"stage": "stage2c", "error": str(err)} for err in stage2c_errors)
+            except Exception as exc:
+                records["stage2c"] = PipelineStageRecord(
+                    name="stage2c",
+                    status="failed",
+                    errors=[{"error": str(exc)}],
+                )
+                errors.append({"stage": "stage2c", "error": str(exc)})
+                log.exception("Stage 2C failed")
+    else:
+        records["stage2c"] = PipelineStageRecord(
+            name="stage2c",
+            status="skipped",
+            skipped_reason="Not listed in pipeline.stages.",
+        )
+
+    if "consensus" in stages:
+        if stage2c_result is None or records["stage2c"].status not in {"success"}:
+            records["consensus"] = PipelineStageRecord(
+                name="consensus",
+                status="skipped",
+                skipped_reason="Stage 2C did not produce validation maps.",
+            )
+        else:
+            try:
+                consensus_cfg = _consensus_config(cfg, stage2b_result, stage2c_result)
+                consensus_result = run_consensus(consensus_cfg)
+                consensus_errors = list(consensus_result.get("errors") or [])
+                status = str(consensus_result.get("status", "success"))
+                records["consensus"] = PipelineStageRecord(
+                    name="consensus",
+                    status=status,
+                    output_dir=str(consensus_result.get("output_dir")) if consensus_result.get("output_dir") else None,
+                    summary_path=str(Path(str(consensus_result.get("output_dir"))) / "consensus_summary.json")
+                    if consensus_result.get("output_dir") else None,
+                    errors=consensus_errors,
+                )
+                if status == "failed":
+                    errors.extend({"stage": "consensus", **err} if isinstance(err, dict) else {"stage": "consensus", "error": str(err)} for err in consensus_errors)
+            except Exception as exc:
+                records["consensus"] = PipelineStageRecord(
+                    name="consensus",
+                    status="failed",
+                    errors=[{"error": str(exc)}],
+                )
+                errors.append({"stage": "consensus", "error": str(exc)})
+                log.exception("Consensus failed")
+    else:
+        records["consensus"] = PipelineStageRecord(
+            name="consensus",
+            status="skipped",
+            skipped_reason="Not listed in pipeline.stages.",
+        )
+
     summary_path = _write_pipeline_summary(
         output_dir=output_dir,
         config_path=config_path,
@@ -215,6 +308,8 @@ def run_pipeline(
         stage1=stage1_result,
         stage2a=stage2a_result,
         stage2b=stage2b_result,
+        stage2c=stage2c_result,
+        consensus=consensus_result,
         errors=errors,
     )
 
@@ -267,6 +362,27 @@ def _stage2b_config(cfg: dict[str, Any], stage2a_dir: Path) -> dict[str, Any]:
     stage2b["stage2_dir"] = str(stage2a_dir)
     stage2b.setdefault("output_dir", None)
     return stage2b
+
+
+def _stage2c_config(cfg: dict[str, Any], stage2a_dir: Path | None, stage2b_dir: Path | None) -> dict[str, Any]:
+    stage2c = copy.deepcopy(cfg.get("stage2c") or {})
+    if stage2a_dir is not None:
+        stage2c["stage2_dir"] = str(stage2a_dir)
+    if stage2b_dir is not None:
+        stage2c["stage2b_dir"] = str(stage2b_dir)
+    stage2c.setdefault("output_dir", None)
+    return stage2c
+
+
+def _consensus_config(cfg: dict[str, Any], stage2b_result: dict[str, Any] | None, stage2c_result: dict[str, Any]) -> dict[str, Any]:
+    consensus = copy.deepcopy(cfg.get("consensus") or {})
+    stage2c_manifest = stage2c_result.get("manifest_path")
+    if stage2c_manifest:
+        consensus.setdefault("stage2c_manifest", str(stage2c_manifest))
+    if stage2b_result and stage2b_result.get("standard_manifest_path"):
+        consensus.setdefault("stage2b_manifest", str(stage2b_result["standard_manifest_path"]))
+    consensus.setdefault("output_dir", None)
+    return consensus
 
 
 def _write_pipeline_summary(

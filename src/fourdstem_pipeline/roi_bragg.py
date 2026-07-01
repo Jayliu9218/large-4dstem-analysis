@@ -163,6 +163,33 @@ def _detector_center(sig_shape: tuple[int, ...]) -> tuple[float, float]:
     return ((sig_shape[0] - 1) / 2.0, (sig_shape[1] - 1) / 2.0)
 
 
+def _cluster_mask_for_roi_data(
+    *,
+    labels: np.ndarray,
+    cluster_id: int,
+    raw_bbox: list[int],
+    r_bin: int,
+    thin_r: int,
+    nav_shape_roi: tuple[int, int],
+) -> np.ndarray:
+    """Map Stage-1 binned cluster labels onto the extracted raw/thinned ROI."""
+    ry0, _ry1, rx0, _rx1 = [int(v) for v in raw_bbox]
+    r_bin = max(1, int(r_bin))
+    thin_r = max(1, int(thin_r))
+    ny, nx = nav_shape_roi
+    mask = np.zeros((ny, nx), dtype=bool)
+    for iy in range(ny):
+        by = (ry0 + iy * thin_r) // r_bin
+        if by < 0 or by >= labels.shape[0]:
+            continue
+        for ix in range(nx):
+            bx = (rx0 + ix * thin_r) // r_bin
+            if bx < 0 or bx >= labels.shape[1]:
+                continue
+            mask[iy, ix] = int(labels[by, bx]) == int(cluster_id)
+    return mask
+
+
 # ---------------------------------------------------------------------------
 # Cluster / background validation helpers
 # ---------------------------------------------------------------------------
@@ -266,6 +293,7 @@ def _save_bragg_peaks_table(
     bragg: Any,
     roi_dir: Path,
     scan_shape: tuple[int, int],
+    min_peak_spacing: float = 4.0,
 ) -> tuple[Path | None, dict[str, Any]]:
     """Extract per-peak tabular data from py4DSTEM and save as Parquet.
 
@@ -289,8 +317,8 @@ def _save_bragg_peaks_table(
     Returns
     -------
     ``(parquet_path, summary)`` tuple.  *parquet_path* is *None* if no peaks
-    were detected.  *summary* is a dict with keys ``parquet_rows``,
-    ``parquet_columns``, ``peaks_per_pattern_mean``, ``peaks_per_pattern_std``.
+    were detected.  *summary* is a dict with row counts, per-pattern peak
+    counts, and per-pattern duplicate/clean peak metrics.
     """
     scan_ys: list[np.ndarray] = []
     scan_xs: list[np.ndarray] = []
@@ -337,6 +365,7 @@ def _save_bragg_peaks_table(
             "parquet_columns": [],
             "peaks_per_pattern_mean": None,
             "peaks_per_pattern_std": None,
+            **_empty_per_pattern_peak_qc(),
         }
 
     df = pd.DataFrame({
@@ -357,6 +386,77 @@ def _save_bragg_peaks_table(
         "parquet_columns": list(df.columns),
         "peaks_per_pattern_mean": round(float(pp_arr.mean()), 2) if pp_arr.size > 0 else None,
         "peaks_per_pattern_std": round(float(pp_arr.std()), 2) if pp_arr.size > 0 else None,
+        **_compute_per_pattern_peak_qc(df, scan_shape, min_peak_spacing=min_peak_spacing),
+    }
+
+
+def _empty_per_pattern_peak_qc() -> dict[str, Any]:
+    """Default per-pattern peak QC values for empty Bragg tables."""
+    return {
+        "duplicate_fraction_per_pattern_median": 0.0,
+        "duplicate_fraction_per_pattern_p90": 0.0,
+        "peak_splitting_warning": False,
+        "median_clean_peaks_per_DP": 0.0,
+        "fraction_DP_with_>=4_peaks": 0.0,
+        "fraction_DP_with_>=6_peaks": 0.0,
+        "fraction_DP_with_>=8_peaks": 0.0,
+    }
+
+
+def _compute_per_pattern_peak_qc(
+    peaks: pd.DataFrame,
+    scan_shape: tuple[int, int],
+    min_peak_spacing: float = 4.0,
+) -> dict[str, Any]:
+    """Compute duplicate and clean-peak QC independently for each DP.
+
+    This intentionally does not pool peaks across scan pixels. The same Bragg
+    disk recurring in many neighbouring diffraction patterns is expected and
+    should not be counted as a duplicate.
+    """
+    ny, nx = scan_shape
+    n_patterns = max(int(ny) * int(nx), 1)
+    duplicate_fracs = np.zeros(n_patterns, dtype=np.float64)
+    clean_counts = np.zeros(n_patterns, dtype=np.float64)
+    if peaks.empty:
+        return _empty_per_pattern_peak_qc()
+
+    spacing = max(float(min_peak_spacing), 0.0)
+    grouped = peaks.groupby(["scan_y", "scan_x"], sort=False)
+    for (scan_y, scan_x), group in grouped:
+        try:
+            idx = int(scan_y) * int(nx) + int(scan_x)
+        except (TypeError, ValueError):
+            continue
+        if idx < 0 or idx >= n_patterns:
+            continue
+        coords = group[["qy", "qx"]].to_numpy(dtype=np.float64, copy=False)
+        n = int(coords.shape[0])
+        if n <= 0:
+            continue
+        if n == 1 or spacing <= 0:
+            clean_counts[idx] = float(n)
+            continue
+        dup_mask = np.zeros(n, dtype=bool)
+        for i in range(n):
+            dists = np.sqrt(np.sum((coords - coords[i]) ** 2, axis=1))
+            dists[i] = np.inf
+            if np.any(dists < spacing):
+                dup_mask[i] = True
+        duplicate_fracs[idx] = float(np.mean(dup_mask))
+        clean_counts[idx] = float(np.sum(~dup_mask))
+
+    median_dup = float(np.median(duplicate_fracs))
+    p90_dup = float(np.percentile(duplicate_fracs, 90))
+    median_clean = float(np.median(clean_counts))
+    return {
+        "duplicate_fraction_per_pattern_median": round(median_dup, 4),
+        "duplicate_fraction_per_pattern_p90": round(p90_dup, 4),
+        "peak_splitting_warning": bool(median_dup > 0.3 or p90_dup > 0.5),
+        "median_clean_peaks_per_DP": round(median_clean, 2),
+        "fraction_DP_with_>=4_peaks": round(float(np.mean(clean_counts >= 4)), 4),
+        "fraction_DP_with_>=6_peaks": round(float(np.mean(clean_counts >= 6)), 4),
+        "fraction_DP_with_>=8_peaks": round(float(np.mean(clean_counts >= 8)), 4),
     }
 
 
@@ -409,12 +509,15 @@ def _compute_bragg_qc_metrics(
             "peak_pixel_count": 0,
             "total_peak_votes": 0,
             "mean_peak_intensity": 0.0,
+            "BVM_peak_background_ratio": None,
             "radial_distances": None,
             "radial_distance_mean": None,
             "radial_distance_std": None,
             "forbidden_center_zone_fraction": 0.0,
+            "center_tail_peak_fraction": 0.0,
             "edge_peak_fraction": 0.0,
             "duplicate_peak_fraction": 0.0,
+            "BVM_duplicate_peak_fraction": 0.0,
             "beam_center_error_estimate": None,
         }
 
@@ -454,10 +557,10 @@ def _compute_bragg_qc_metrics(
     )
     edge_frac = float(np.mean(edge_mask))
 
-    # --- Duplicate-peak fraction ---------------------------------------------
-    # A peak is "duplicate" if it has at least one neighbour peak within
-    # min_peak_spacing pixels.  Use a simple N^2 scan for small peak sets;
-    # fall back to an approximate grid-based check for very large sets.
+    # --- BVM crowding fraction ------------------------------------------------
+    # This is a pooled histogram diagnostic, not the authoritative duplicate
+    # metric. Per-DP duplicates are computed from bragg.raw/parquet rows so
+    # repeated Bragg disks across scan pixels are not misclassified.
     dup_frac: float = 0.0
     if n_peaks > 1:
         positions = np.column_stack([peak_rows.astype(np.float64), peak_cols.astype(np.float64)])
@@ -492,16 +595,32 @@ def _compute_bragg_qc_metrics(
                     dup_mask[i] = True
         dup_frac = float(np.mean(dup_mask))
 
+    background_pixels = vmap[vmap <= 0]
+    peak_background_ratio: float | None = None
+    if background_pixels.size > 0:
+        background_level = float(np.mean(background_pixels))
+        if background_level > 0:
+            peak_background_ratio = float(np.mean(intensities) / background_level)
+        else:
+            peak_background_ratio = None
+
     return {
         "peak_pixel_count": n_peaks,
         "total_peak_votes": int(np.sum(intensities)),
         "mean_peak_intensity": round(float(np.mean(intensities)), 2),
+        "BVM_peak_background_ratio": (
+            round(float(peak_background_ratio), 4)
+            if peak_background_ratio is not None and np.isfinite(peak_background_ratio)
+            else None
+        ),
         "radial_distances": radial_distances,
         "radial_distance_mean": round(radial_mean, 2) if radial_mean is not None else None,
         "radial_distance_std": round(radial_std, 2) if radial_std is not None else None,
         "forbidden_center_zone_fraction": round(center_zone_frac, 4),
+        "center_tail_peak_fraction": round(center_zone_frac, 4),
         "edge_peak_fraction": round(edge_frac, 4),
         "duplicate_peak_fraction": round(dup_frac, 4),
+        "BVM_duplicate_peak_fraction": round(dup_frac, 4),
         "beam_center_error_estimate": round(beam_center_err, 2) if beam_center_err is not None else None,
     }
 
@@ -605,6 +724,7 @@ class ROIBraggResult:
     sig_shape: tuple[int, int] = (0, 0)
     output_dir: Path = field(default_factory=Path)
     roi_data_path: Path | None = None
+    mean_dp_path: Path | None = None
     bragg_vector_map_path: Path | None = None
     bragg_summary_path: Path | None = None
     bragg_peaks_parquet_path: Path | None = None
@@ -618,6 +738,7 @@ class ROIBraggResult:
     cluster_validation_warning: str | None = None
     error: str | None = None
     bragg_qc: dict[str, Any] | None = None
+    cluster_mask: dict[str, Any] | None = None
     # Benchmark fields
     extraction_time_s: float = 0.0
     bragg_time_s: float = 0.0
@@ -1033,6 +1154,37 @@ def _process_one_roi(
         r_bin=r_bin,
     )
 
+    analysis_data = roi_data
+    cluster_mask_stats: dict[str, Any] = {
+        "applied": False,
+        "cluster_id": cluster_id,
+        "selected_patterns": int(np.prod(nav_shape_roi)),
+        "total_patterns": int(np.prod(nav_shape_roi)),
+        "selected_fraction": 1.0,
+        "warning": None,
+    }
+    if cluster_id is not None and labels is not None:
+        mask = _cluster_mask_for_roi_data(
+            labels=labels,
+            cluster_id=int(cluster_id),
+            raw_bbox=raw_bbox,
+            r_bin=r_bin,
+            thin_r=thin_r,
+            nav_shape_roi=tuple(int(v) for v in nav_shape_roi),
+        )
+        selected = int(np.sum(mask))
+        total = int(mask.size)
+        cluster_mask_stats.update({
+            "applied": True,
+            "selected_patterns": selected,
+            "total_patterns": total,
+            "selected_fraction": round(selected / max(total, 1), 4),
+        })
+        if selected > 0:
+            analysis_data = roi_data[mask][:, None, :, :]
+        else:
+            cluster_mask_stats["warning"] = "Cluster mask selected zero diffraction patterns; using full ROI."
+
     # --- Save raw ROI data (optional — large; off by default) ----------------
     roi_data_path: Path | None = None
     if save_roi_data:
@@ -1040,14 +1192,16 @@ def _process_one_roi(
         np.save(roi_data_path, roi_data)
 
     # --- Visualise mean diffraction pattern ----------------------------------
+    mean_dp_path = roi_dir / "mean_dp.npy"
     try:
-        mean_dp = np.asarray(roi_data.mean(axis=(0, 1), dtype=np.float32), dtype=np.float32)
+        mean_dp = np.asarray(analysis_data.mean(axis=(0, 1), dtype=np.float32), dtype=np.float32)
+        np.save(mean_dp_path, mean_dp)
         save_png(roi_dir / "mean_dp.png", np.log1p(mean_dp))
     except Exception:
         pass
 
     # --- Build py4DSTEM DataCube and bin ------------------------------------
-    dc_roi = py4DSTEM.DataCube(roi_data, name=name, calibration=cube.calibration)
+    dc_roi = py4DSTEM.DataCube(analysis_data, name=name, calibration=cube.calibration)
     binned_sig_shape = sig_shape
     if bin_q > 1:
         dc_roi = dc_roi.bin_Q(bin_q, dtype=np.float32)
@@ -1073,7 +1227,10 @@ def _process_one_roi(
 
     # --- Save tabular Bragg peaks (parquet) ----------------------------------
     parquet_path, parquet_summary = _save_bragg_peaks_table(
-        bragg, roi_dir, scan_shape=nav_shape_roi,
+        bragg,
+        roi_dir,
+        scan_shape=tuple(int(v) for v in dc_roi.data.shape[:2]),
+        min_peak_spacing=float(bragg_kwargs.get("minPeakSpacing", 4)),
     )
 
     # --- Save Bragg vector map ----------------------------------------------
@@ -1121,6 +1278,16 @@ def _process_one_roi(
     # --- Per-pattern peak counts (from parquet summary) ----------------------
     bragg_qc["peaks_per_pattern_mean"] = parquet_summary.get("peaks_per_pattern_mean")
     bragg_qc["peaks_per_pattern_std"] = parquet_summary.get("peaks_per_pattern_std")
+    for key in (
+        "duplicate_fraction_per_pattern_median",
+        "duplicate_fraction_per_pattern_p90",
+        "peak_splitting_warning",
+        "median_clean_peaks_per_DP",
+        "fraction_DP_with_>=4_peaks",
+        "fraction_DP_with_>=6_peaks",
+        "fraction_DP_with_>=8_peaks",
+    ):
+        bragg_qc[key] = parquet_summary.get(key)
 
     # --- Radius histogram PNG -------------------------------------------------
     if bragg_qc.get("radial_distances") is not None:
@@ -1167,6 +1334,7 @@ def _process_one_roi(
         "thin_r": thin_r,
         "bin_q": bin_q,
         "n_bragg_peaks": n_peaks,
+        "mean_dp_path": str(mean_dp_path),
         "bragg_params": bragg_params_display,
         "cuda_used": bool(bragg_kwargs.get("CUDA", False)),
         "beam_center_yx": beam_cyx_list,
@@ -1180,6 +1348,7 @@ def _process_one_roi(
             "sample_mask_available": cluster_validation.get("sample_mask_available"),
             "warning": cluster_validation.get("warning"),
         },
+        "cluster_mask": cluster_mask_stats,
         "dependencies": {
             "py4dstem_version": py4dstem_version,
             "data_path": data_path_str,
@@ -1212,6 +1381,7 @@ def _process_one_roi(
         sig_shape=sig_shape,
         output_dir=roi_dir,
         roi_data_path=roi_data_path,
+        mean_dp_path=mean_dp_path,
         bragg_vector_map_path=bragg_vector_map_path,
         bragg_summary_path=bragg_summary_path,
         bragg_peaks_parquet_path=parquet_path,
@@ -1224,6 +1394,7 @@ def _process_one_roi(
         sample_mask_coverage=cluster_validation.get("sample_mask_coverage"),
         cluster_validation_warning=cluster_validation.get("warning"),
         bragg_qc=bragg_qc,
+        cluster_mask=cluster_mask_stats,
         extraction_time_s=round(extraction_time_s, 4),
         bragg_time_s=round(bragg_time_s, 4),
         total_time_s=round(extraction_time_s + bragg_time_s, 4),

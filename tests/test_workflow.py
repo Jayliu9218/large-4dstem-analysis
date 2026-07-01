@@ -39,6 +39,19 @@ class WorkflowTests(unittest.TestCase):
             shutil.rmtree(self.output_dir)
         self.output_dir.mkdir(parents=True)
 
+    def _ready_bragg_qc(self):
+        return {
+            "median_clean_peaks_per_DP": 6,
+            "fraction_DP_with_>=4_peaks": 0.75,
+            "fraction_DP_with_>=6_peaks": 0.5,
+            "fraction_DP_with_>=8_peaks": 0.25,
+            "duplicate_fraction_per_pattern_median": 0.0,
+            "duplicate_fraction_per_pattern_p90": 0.0,
+            "peak_splitting_warning": False,
+            "edge_peak_fraction": 0.0,
+            "center_tail_peak_fraction": 0.0,
+        }
+
     def test_synthetic_loader_reports_navigation_and_signal_shapes(self):
         dataset = load_dataset("synthetic://demo")
         self.assertEqual(dataset.navigation_shape, (16, 16))
@@ -542,6 +555,112 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(run_pipe.call_args.kwargs["config"], "configs/pipeline_smoke.yaml")
         pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('fourdstem-pipeline = "fourdstem_pipeline.cli:pipeline"', pyproject)
+
+    def test_stage2c_standardises_existing_pyxem_npz(self):
+        """Stage 2C converts the standalone pyxem script NPZ into project schema arrays."""
+        from fourdstem_pipeline.pyxem_validation import run_stage2c_validation
+
+        npz_path = self.output_dir / "pyxem_ti_phase_orientation_results.npz"
+        np.savez_compressed(
+            npz_path,
+            phase_names=np.array(["Ti-bcc", "Ti-hcp"]),
+            best_phase_index=np.array([[0, 1], [0, 1]], dtype=np.int16),
+            best_correlation=np.array([[0.8, 0.7], [0.6, 0.5]], dtype=np.float32),
+            phase_margin=np.array([[0.2, 0.1], [0.05, np.nan]], dtype=np.float32),
+            ambiguous_mask=np.array([[False, False], [True, True]]),
+            high_confidence_mask=np.array([[True, True], [False, False]]),
+            best_rotation_deg=np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        )
+
+        out_dir = self.output_dir / "stage2c"
+        summary = run_stage2c_validation({
+            "output_dir": str(out_dir),
+            "input": {"results_npz": str(npz_path)},
+            "candidates": {"phases": [{"name": "Ti-bcc"}, {"name": "Ti-hcp"}]},
+        })
+
+        self.assertEqual(summary["status"], "success")
+        self.assertTrue((out_dir / "stage2c_manifest.json").exists())
+        self.assertTrue((out_dir / "phase_index.npy").exists())
+        self.assertTrue((out_dir / "score_margin.npy").exists())
+        self.assertTrue((out_dir / "pyxem_phase_index.npy").exists())
+        self.assertTrue((out_dir / "pyxem_correlation.npy").exists())
+        self.assertTrue((out_dir / "pyxem_margin.npy").exists())
+        self.assertTrue((out_dir / "pyxem_ambiguous_mask.npy").exists())
+        manifest = json.loads((out_dir / "stage2c_manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["arrays"]["phase_index"], "phase_index.npy")
+        self.assertEqual(manifest["arrays"]["pyxem_phase_index"], "pyxem_phase_index.npy")
+        np.testing.assert_array_equal(np.load(out_dir / "phase_index.npy"), np.array([[0, 1], [0, 1]], dtype=np.int16))
+
+    def test_consensus_uses_ti_specific_conflict_labels(self):
+        from fourdstem_pipeline.consensus import CONSENSUS_LABELS, _build_consensus_map
+
+        stage2b = {
+            "phase_index": np.array([[0, 1, 0], [1, 0, -1]], dtype=np.int16),
+            "high_confidence_mask": np.array([[True, True, True], [False, False, False]]),
+            "ambiguous_mask": np.array([[False, False, False], [True, True, True]]),
+        }
+        stage2c = {
+            "phase_index": np.array([[0, 1, 1], [1, 0, -1]], dtype=np.int16),
+            "high_confidence_mask": np.array([[True, False, True], [True, False, False]]),
+            "ambiguous_mask": np.array([[False, True, False], [False, True, True]]),
+        }
+
+        consensus = _build_consensus_map(stage2b, stage2c)
+
+        self.assertEqual(CONSENSUS_LABELS[1], "AGREED_Ti_bcc")
+        self.assertEqual(CONSENSUS_LABELS[8], "CONFLICT_BCC_HCP")
+        self.assertEqual(consensus[0, 0], 1)
+        self.assertEqual(consensus[0, 1], 4)
+        self.assertEqual(consensus[0, 2], 8)
+        self.assertEqual(consensus[1, 0], 6)
+        self.assertEqual(consensus[1, 1], 7)
+        self.assertEqual(consensus[1, 2], 0)
+
+    def test_run_pipeline_injects_stage2c_paths(self):
+        """Unified runner injects Stage 2A/2B paths into Stage 2C."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        stage1_dir = self.output_dir / "stage1"
+        stage2a_dir = stage1_dir / "stage2" / "roi_bragg"
+        stage2b_dir = stage2a_dir / "stage2b_indexing"
+        stage2c_dir = stage2a_dir / "stage2c_pyxem_validation"
+        stage2a_dir.mkdir(parents=True)
+        stage2b_dir.mkdir()
+        config = {
+            "pipeline": {"stages": ["stage1", "stage2a", "stage2b", "stage2c"], "output_dir": str(self.output_dir / "pipeline")},
+            "project": {"name": "pipe_stage2c", "output_dir": str(stage1_dir)},
+            "data": {"path": "synthetic://demo"},
+            "stage2a": {},
+            "stage2b": {"candidate_cifs": []},
+            "stage2c": {"input": {"results_npz": "pyxem.npz"}},
+        }
+        fake_stage1 = SimpleNamespace(output_dir=stage1_dir, summary_path=stage1_dir / "workflow_summary.json", errors=[])
+        fake_stage2a = SimpleNamespace(output_dir=stage2a_dir, roi_results=[])
+        fake_stage2b = {"output_dir": str(stage2b_dir)}
+        fake_stage2c = {
+            "status": "success",
+            "output_dir": str(stage2c_dir),
+            "manifest_path": str(stage2c_dir / "stage2c_manifest.json"),
+            "errors": None,
+        }
+
+        with patch("fourdstem_pipeline.pipeline.run_workflow", return_value=fake_stage1), \
+             patch("fourdstem_pipeline.pipeline.run_stage2", return_value=fake_stage2a), \
+             patch("fourdstem_pipeline.pipeline.run_stage2_indexing", return_value=fake_stage2b), \
+             patch("fourdstem_pipeline.pipeline.run_stage2c_validation", return_value=fake_stage2c) as s2c:
+            result = run_pipeline(config)
+
+        self.assertEqual(result.stages["stage2c"].status, "success")
+        self.assertEqual(s2c.call_args.args[0]["stage2_dir"], str(stage2a_dir))
+        self.assertEqual(s2c.call_args.args[0]["stage2b_dir"], str(stage2b_dir))
+
+    def test_pyxem_script_roi_uses_project_yx_order(self):
+        """Standalone pyxem script follows y0,y1,x0,x1 ROI convention."""
+        script = (Path(__file__).resolve().parents[1] / "scripts" / "pyxem_hyperspy_ti_phase_orientation.py").read_text(encoding="utf-8")
+        self.assertIn('metavar=("Y0", "Y1", "X0", "X1")', script)
+        self.assertIn("s.inav[y0:y1, x0:x1]", script)
 
     def test_qc_summary_and_report_use_ascii_labels(self):
         """QC summary and report Markdown contain only ASCII labels, no emoji."""
@@ -1134,6 +1253,13 @@ class WorkflowTests(unittest.TestCase):
                     "beam_center_source": "stage1_com",
                     "background_fraction": 0.0,
                     "sample_mask_coverage": 1.0,
+                    "bragg_qc": {
+                        "median_clean_peaks_per_DP": 6,
+                        "fraction_DP_with_>=6_peaks": 0.5,
+                        "peak_splitting_warning": False,
+                        "edge_peak_fraction": 0.0,
+                        "center_tail_peak_fraction": 0.0,
+                    },
                     "error": None,
                 },
                 {
@@ -1148,6 +1274,13 @@ class WorkflowTests(unittest.TestCase):
                     "beam_center_source": "detector_center_fallback",
                     "background_fraction": 0.0,
                     "sample_mask_coverage": 1.0,
+                    "bragg_qc": {
+                        "median_clean_peaks_per_DP": 3,
+                        "fraction_DP_with_>=6_peaks": 0.0,
+                        "peak_splitting_warning": False,
+                        "edge_peak_fraction": 0.0,
+                        "center_tail_peak_fraction": 0.0,
+                    },
                     "error": None,
                 },
                 {"name": "failed", "error": "boom"},
@@ -1158,15 +1291,15 @@ class WorkflowTests(unittest.TestCase):
         md = md_path.read_text(encoding="utf-8")
         html = html_path.read_text(encoding="utf-8")
 
-        self.assertIn("[READY] Ready", md)
-        self.assertIn("[REVIEW] Review", md)
+        self.assertIn("READY_FOR_INDEXING", md)
+        self.assertIn("READY_FOR_SCREENING_ONLY", md)
         self.assertIn("[FAIL] boom", md)
         for text in (md, html):
             self.assertTrue(all(ord(ch) < 128 for ch in text))
 
     def test_stage2_indexing_readiness_contract_shared(self):
         """Stage 2A report and Stage 2B use one shared ROI readiness rule."""
-        from fourdstem_pipeline.contracts import is_roi_ready_for_indexing
+        from fourdstem_pipeline.contracts import is_roi_ready_for_indexing, roi_indexing_readiness
         from fourdstem_pipeline.export_stage2 import _indexing_verdict
 
         roi = {
@@ -1175,13 +1308,27 @@ class WorkflowTests(unittest.TestCase):
             "background_fraction": 0.0,
             "sample_mask_coverage": 1.0,
             "beam_center_source": "stage1_com",
+            "bragg_qc": {
+                "median_clean_peaks_per_DP": 6,
+                "fraction_DP_with_>=6_peaks": 0.5,
+                "peak_splitting_warning": False,
+                "edge_peak_fraction": 0.0,
+                "center_tail_peak_fraction": 0.0,
+            },
         }
         self.assertTrue(is_roi_ready_for_indexing(roi))
-        self.assertEqual(_indexing_verdict(roi), "[READY] Ready")
+        self.assertEqual(roi_indexing_readiness(roi), "READY_FOR_INDEXING")
+        self.assertEqual(_indexing_verdict(roi), "READY_FOR_INDEXING")
 
         roi["beam_center_source"] = "detector_center_fallback"
         self.assertFalse(is_roi_ready_for_indexing(roi))
-        self.assertEqual(_indexing_verdict(roi), "[REVIEW] Review (no calib)")
+        self.assertEqual(roi_indexing_readiness(roi), "READY_FOR_SCREENING_ONLY")
+        self.assertEqual(_indexing_verdict(roi), "READY_FOR_SCREENING_ONLY")
+
+        roi["beam_center_source"] = "stage1_com"
+        roi["bragg_qc"]["peak_splitting_warning"] = True
+        self.assertFalse(is_roi_ready_for_indexing(roi))
+        self.assertEqual(roi_indexing_readiness(roi), "NOT_INDEXABLE")
 
     def test_stage2b_indexing_contract_with_mock_candidates(self):
         """Stage 2B scaffold consumes accepted Stage 2A ROIs and CIF metadata."""
@@ -1202,6 +1349,7 @@ class WorkflowTests(unittest.TestCase):
                         "background_fraction": 0.0,
                         "sample_mask_coverage": 1.0,
                         "beam_center_source": "stage1_com",
+                        "bragg_qc": self._ready_bragg_qc(),
                         "bragg_summary_path": str(stage2_dir / "roi_good" / "bragg_summary.json"),
                     },
                     {
@@ -1247,6 +1395,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertIsNone(summary["roi_results"][0]["second_best_candidate"])
         self.assertIsNone(summary["roi_results"][0]["best_zone_axis"])
         self.assertIsNone(summary["roi_results"][0]["score_margin"])
+        self.assertTrue((output_dir / "stage2b_standard_manifest.json").exists())
+        self.assertEqual(summary["standard_manifest_path"], str(output_dir / "stage2b_standard_manifest.json"))
+        self.assertIn(summary["roi_results"][0]["indexability_tier"], {"INDEXABLE", "SCREENING_ONLY", "NOT_INDEXABLE"})
 
     def test_stage2b_generates_cif_templates_and_matches_roi(self):
         """Stage 2B generates analytic CIF templates and matches ROI mean DPs."""
@@ -1303,6 +1454,7 @@ class WorkflowTests(unittest.TestCase):
                         "beam_center_source": "stage1_com",
                         "beam_center_yx": [16.0, 16.0],
                         "sig_shape": [32, 32],
+                        "bragg_qc": self._ready_bragg_qc(),
                         "roi_data_path": str(roi_data_path),
                         "bragg_summary_path": str(roi_dir / "bragg_summary.json"),
                     },
@@ -1383,6 +1535,7 @@ class WorkflowTests(unittest.TestCase):
                         "background_fraction": 0.0,
                         "sample_mask_coverage": 1.0,
                         "beam_center_source": "stage1_com",
+                        "bragg_qc": self._ready_bragg_qc(),
                     },
                 ],
             }),
@@ -1451,6 +1604,7 @@ class WorkflowTests(unittest.TestCase):
                     "beam_center_source": "stage1_com",
                     "beam_center_yx": [16.0, 16.0],
                     "sig_shape": [32, 32],
+                    "bragg_qc": self._ready_bragg_qc(),
                     "roi_data_path": None,
                     "bragg_vector_map_path": str(bragg_map_path),
                     "bragg_summary_path": str(roi_dir / "bragg_summary.json"),
@@ -1500,6 +1654,7 @@ class WorkflowTests(unittest.TestCase):
                         "beam_center_source": "stage1_com",
                         "sig_shape": [32, 32],
                         "beam_center_yx": [16.0, 16.0],
+                        "bragg_qc": self._ready_bragg_qc(),
                     },
                 ],
             }),
@@ -1536,6 +1691,7 @@ class WorkflowTests(unittest.TestCase):
                         "background_fraction": 0.0,
                         "sample_mask_coverage": 1.0,
                         "beam_center_source": "stage1_com",
+                        "bragg_qc": self._ready_bragg_qc(),
                     },
                 ],
             }),
@@ -1607,6 +1763,7 @@ class WorkflowTests(unittest.TestCase):
                     "background_fraction": 0.0, "sample_mask_coverage": 1.0,
                     "beam_center_source": "stage1_com",
                     "beam_center_yx": [16.0, 16.0], "sig_shape": [32, 32],
+                    "bragg_qc": self._ready_bragg_qc(),
                     "roi_data_path": str(roi_data_path),
                     "bragg_summary_path": str(roi_dir / "bragg_summary.json"),
                 }],
@@ -1706,6 +1863,7 @@ class WorkflowTests(unittest.TestCase):
                     "background_fraction": 0.0, "sample_mask_coverage": 1.0,
                     "beam_center_source": "stage1_com",
                     "beam_center_yx": [16.0, 16.0], "sig_shape": [32, 32],
+                    "bragg_qc": self._ready_bragg_qc(),
                     "roi_data_path": str(roi_data_path),
                     "bragg_summary_path": str(roi_dir / "bragg_summary.json"),
                 }],
@@ -1783,6 +1941,7 @@ class WorkflowTests(unittest.TestCase):
                     "background_fraction": 0.0, "sample_mask_coverage": 1.0,
                     "beam_center_source": "stage1_com",
                     "beam_center_yx": [16.0, 16.0], "sig_shape": [32, 32],
+                    "bragg_qc": self._ready_bragg_qc(),
                     "roi_data_path": str(roi_data_path),
                     "bragg_summary_path": str(roi_dir / "bragg_summary.json"),
                 }],
@@ -1853,6 +2012,7 @@ class WorkflowTests(unittest.TestCase):
                     "background_fraction": 0.0, "sample_mask_coverage": 1.0,
                     "beam_center_source": "stage1_com",
                     "beam_center_yx": [16.0, 16.0], "sig_shape": [32, 32],
+                    "bragg_qc": self._ready_bragg_qc(),
                     "roi_data_path": str(roi_data_path),
                     "bragg_summary_path": str(roi_dir / "bragg_summary.json"),
                 }],
@@ -1926,6 +2086,7 @@ class WorkflowTests(unittest.TestCase):
                     "background_fraction": 0.0, "sample_mask_coverage": 1.0,
                     "beam_center_source": "stage1_com",
                     "beam_center_yx": [16.0, 16.0], "sig_shape": [32, 32],
+                    "bragg_qc": self._ready_bragg_qc(),
                     "roi_data_path": str(roi_data_path),
                     "bragg_summary_path": str(roi_dir / "bragg_summary.json"),
                 }],
@@ -2245,6 +2406,53 @@ class WorkflowTests(unittest.TestCase):
         # Third peak at (1,0)
         self.assertEqual(df.iloc[2]["scan_y"], 0)
         self.assertEqual(df.iloc[2]["scan_x"], 1)
+
+    def test_per_dp_duplicates_do_not_pool_across_scan_pixels(self):
+        """Repeated q positions in different DPs are not duplicates."""
+        from fourdstem_pipeline.roi_bragg import _compute_per_pattern_peak_qc
+        import pandas as pd
+
+        df = pd.DataFrame({
+            "scan_y": [0, 0, 1, 1],
+            "scan_x": [0, 1, 0, 1],
+            "qy": [10.0, 10.0, 10.0, 10.0],
+            "qx": [20.0, 20.0, 20.0, 20.0],
+            "intensity": [1.0, 1.0, 1.0, 1.0],
+        })
+        qc = _compute_per_pattern_peak_qc(df, scan_shape=(2, 2), min_peak_spacing=4)
+        self.assertEqual(qc["duplicate_fraction_per_pattern_median"], 0.0)
+        self.assertEqual(qc["duplicate_fraction_per_pattern_p90"], 0.0)
+        self.assertFalse(qc["peak_splitting_warning"])
+        self.assertEqual(qc["median_clean_peaks_per_DP"], 1.0)
+
+    def test_per_dp_duplicate_warning_for_same_pattern_close_peaks(self):
+        """Close peaks in the same DP trigger peak splitting warning."""
+        from fourdstem_pipeline.roi_bragg import _compute_per_pattern_peak_qc
+        import pandas as pd
+
+        df = pd.DataFrame({
+            "scan_y": [0, 0, 0, 1, 1, 1],
+            "scan_x": [0, 0, 0, 1, 1, 1],
+            "qy": [10.0, 11.0, 40.0, 12.0, 13.0, 41.0],
+            "qx": [20.0, 20.5, 40.0, 21.0, 21.5, 41.0],
+            "intensity": [1.0] * 6,
+        })
+        qc = _compute_per_pattern_peak_qc(df, scan_shape=(2, 2), min_peak_spacing=4)
+        self.assertGreater(qc["duplicate_fraction_per_pattern_p90"], 0.5)
+        self.assertTrue(qc["peak_splitting_warning"])
+
+    def test_calibration_sweep_grid_and_best_selection(self):
+        """Calibration sweep uses the fixed grid and ranks by evidence metrics."""
+        from fourdstem_pipeline.evidence_qc import calibration_sweep_grid, select_best_calibration_run
+
+        grid = calibration_sweep_grid(0.0192)
+        self.assertEqual(len(grid), 45)
+        self.assertAlmostEqual(grid[0].inv_ang_per_pixel, 0.0192 * 0.97)
+        best = select_best_calibration_run([
+            {"radial_support_median": 0.0, "matched_template_fraction_median": 0.2, "unexplained_peak_fraction_median": 0.8, "q_residual_median": 5.0},
+            {"radial_support_median": 0.3, "matched_template_fraction_median": 0.1, "unexplained_peak_fraction_median": 0.9, "q_residual_median": 8.0},
+        ])
+        self.assertEqual(best["radial_support_median"], 0.3)
 
     def test_stage2_gallery_generates_self_contained_html(self):
         """Gallery HTML uses relative img refs + cross-ROI comparison section."""

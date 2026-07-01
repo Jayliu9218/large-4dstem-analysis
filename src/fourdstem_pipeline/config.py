@@ -202,6 +202,34 @@ _SCHEMA: dict[str, dict[str, Any]] = {
             "candidate_cifs",
         },
     },
+    "stage2c": {
+        "allowed": {
+            "stage2_dir",
+            "stage2b_dir",
+            "output_dir",
+            "enabled",
+            "backend",
+            "dry_run",
+            "input",
+            "results_npz",
+            "candidates",
+            "candidate_phases",
+            "calibration",
+            "polar",
+            "orientation",
+            "qc",
+            "runtime",
+        },
+    },
+    "consensus": {
+        "allowed": {
+            "output_dir",
+            "stage2b_manifest",
+            "stage2b_results",
+            "stage2c_manifest",
+            "stage2c_results",
+        },
+    },
 }
 
 _KNOWN_TOP_KEYS = set(_SCHEMA)
